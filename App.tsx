@@ -951,6 +951,7 @@ export default function App() {
       }} showToast={showToast} onEnableLocation={updateLocation} onNavigate={setView} />;
       case 'settings': return <SettingsScreen user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
       case 'workCalendar': return <WorkCalendar user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
+      case 'paymentsCredits': return <PaymentsCredits user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
       case 'safety': return <SafetyCentre user={user} onBack={() => setView('profile')} showToast={showToast} />;
       case 'admin': return <AdminPanel user={user} onBack={() => setView('profile')} showToast={showToast} />;
       default: return <Feed user={user} activeTab={activeTab} setActiveTab={setActiveTab} />;
@@ -2367,6 +2368,34 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                 updateData['serviceLocation.address'] = '';
                 updateData['serviceLocation.phone'] = '';
                 updateData['serviceLocation.email'] = '';
+                
+                // Move payment from "On Hold" to "Available" for tradie
+                const jobDoc = await getDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId));
+                if (jobDoc.exists()) {
+                    const jobData = jobDoc.data();
+                    if (jobData.tradieUid && jobData.tradieAmount) {
+                        const tradieAmount = jobData.tradieAmount;
+                        
+                        // Update tradie's balance
+                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', jobData.tradieUid), {
+                            'finances.onHoldBalance': increment(-tradieAmount),
+                            'finances.availableBalance': increment(tradieAmount)
+                        });
+                        
+                        // Update transaction status
+                        const q = query(
+                            collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+                            where('jobId', '==', jobId),
+                            where('type', '==', 'payment')
+                        );
+                        const txSnapshot = await getDocs(q);
+                        txSnapshot.forEach(async (txDoc) => {
+                            await updateDoc(txDoc.ref, {
+                                status: 'completed'
+                            });
+                        });
+                    }
+                }
             }
             
             await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId), updateData);
@@ -2634,14 +2663,43 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
         if (!jobForPayment) return;
         setProcessingPayment(true);
         
-        // Simulate payment processing (replace with real Stripe integration)
+        // Simulate payment processing
         setTimeout(async () => {
             try {
+                const paymentAmount = jobForPayment.quote?.total || 0;
+                const commission = paymentAmount * 0.15; // 15% commission
+                const tradieAmount = paymentAmount - commission;
+                
+                // Update job status
                 await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobForPayment.id), {
                     status: 'PaymentComplete',
                     paymentCompletedAt: serverTimestamp(),
-                    paymentAmount: jobForPayment.quote?.total || 0
+                    paymentAmount: paymentAmount,
+                    commission: commission,
+                    tradieAmount: tradieAmount
                 });
+                
+                // Add payment to tradie's "On Hold" balance
+                if (jobForPayment.tradieUid) {
+                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', jobForPayment.tradieUid), {
+                        'finances.onHoldBalance': increment(tradieAmount),
+                        'finances.totalEarnings': increment(tradieAmount),
+                        'finances.totalCommissionPaid': increment(commission)
+                    });
+                    
+                    // Create transaction record
+                    await addDoc(collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'), {
+                        tradieUid: jobForPayment.tradieUid,
+                        jobId: jobForPayment.id,
+                        jobTitle: jobForPayment.title || 'Job',
+                        type: 'payment',
+                        amount: tradieAmount,
+                        commission: commission,
+                        status: 'onHold',
+                        createdAt: serverTimestamp()
+                    });
+                }
+                
                 setProcessingPayment(false);
                 setShowPaymentModal(false);
                 setJobForPayment(null);
@@ -4110,7 +4168,9 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
                 {profile.role === 'tradie' && (
                     <ProfileLink icon={Calendar} label="Work Calendar" onClick={() => onNavigate('workCalendar')} />
                 )}
-                <ProfileLink icon={DollarSign} label="Payments & Credits" onClick={() => {}} />
+                {profile.role === 'tradie' && (
+                    <ProfileLink icon={DollarSign} label="Payments & Credits" onClick={() => onNavigate('paymentsCredits')} />
+                )}
                 <ProfileLink icon={ShieldCheck} label="Safety Centre" onClick={() => onNavigate('safety')} />
                 <button onClick={onLogout} className="w-full p-4 flex items-center gap-3 text-red-500 hover:bg-red-50 rounded-xl transition-colors font-bold"><LogOut size={20} /> <span className="font-medium">Sign Out</span></button>
             </div>
@@ -4597,6 +4657,299 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                                         </div>
                                     </div>
                                 ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// --- PAYMENTS & CREDITS ---
+const PaymentsCredits = ({ user, profile, onBack, showToast }) => {
+    const [transactions, setTransactions] = useState([]);
+    const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+    const [withdrawMethod, setWithdrawMethod] = useState('bank'); // 'bank' or 'crypto'
+    const [withdrawAmount, setWithdrawAmount] = useState('');
+    
+    // Financial stats
+    const onHoldBalance = profile?.finances?.onHoldBalance || 0;
+    const availableBalance = profile?.finances?.availableBalance || 0;
+    const totalEarnings = profile?.finances?.totalEarnings || 0;
+    const totalCommissionPaid = profile?.finances?.totalCommissionPaid || 0;
+    
+    // Load transactions
+    useEffect(() => {
+        if (!user) return;
+        
+        const q = query(
+            collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+            where('tradieUid', '==', user.uid),
+            orderBy('createdAt', 'desc'),
+            limit(50)
+        );
+        
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const txs = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setTransactions(txs);
+        });
+        
+        return () => unsubscribe();
+    }, [user]);
+    
+    const handleWithdraw = async () => {
+        if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) {
+            showToast("Please enter a valid amount", "error");
+            return;
+        }
+        
+        const amount = parseFloat(withdrawAmount);
+        if (amount > availableBalance) {
+            showToast("Insufficient available balance", "error");
+            return;
+        }
+        
+        try {
+            // Create withdrawal transaction
+            await addDoc(collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'), {
+                tradieUid: user.uid,
+                type: 'withdrawal',
+                amount: -amount,
+                method: withdrawMethod,
+                status: 'pending',
+                createdAt: serverTimestamp()
+            });
+            
+            // Update user's available balance
+            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', user.uid), {
+                'finances.availableBalance': increment(-amount)
+            });
+            
+            showToast(`Withdrawal of £${amount.toFixed(2)} initiated via ${withdrawMethod === 'bank' ? 'Bank Transfer' : 'Crypto Wallet'}`, "success");
+            setShowWithdrawModal(false);
+            setWithdrawAmount('');
+        } catch (error) {
+            console.error("Error processing withdrawal:", error);
+            showToast("Failed to process withdrawal", "error");
+        }
+    };
+    
+    return (
+        <div className="min-h-screen bg-slate-50">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-4 sticky top-0 z-10 shadow-md">
+                <div className="flex items-center gap-3">
+                    <button onClick={onBack} className="p-2 hover:bg-white/20 rounded-lg transition-colors">
+                        <ChevronLeft size={24} />
+                    </button>
+                    <div className="flex items-center gap-2">
+                        <DollarSign size={24} />
+                        <h1 className="text-xl font-bold">Payments & Credits</h1>
+                    </div>
+                </div>
+            </div>
+
+            <div className="p-4 space-y-4">
+                {/* Balance Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                    {/* On Hold */}
+                    <div className="bg-gradient-to-br from-amber-500 to-amber-600 rounded-xl p-4 text-white shadow-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Clock size={18} />
+                            <p className="text-xs font-medium opacity-90">On Hold</p>
+                        </div>
+                        <p className="text-2xl font-bold">£{onHoldBalance.toFixed(2)}</p>
+                        <p className="text-xs opacity-75 mt-1">Pending completion</p>
+                    </div>
+                    
+                    {/* Available */}
+                    <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white shadow-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                            <CheckCircle size={18} />
+                            <p className="text-xs font-medium opacity-90">Available</p>
+                        </div>
+                        <p className="text-2xl font-bold">£{availableBalance.toFixed(2)}</p>
+                        <p className="text-xs opacity-75 mt-1">Ready to withdraw</p>
+                    </div>
+                </div>
+
+                {/* Stats Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                    {/* Total Earnings */}
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Earnings</p>
+                        <p className="text-xl font-bold text-slate-900">£{totalEarnings.toFixed(2)}</p>
+                    </div>
+                    
+                    {/* Commission Paid */}
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Commission (15%)</p>
+                        <p className="text-xl font-bold text-slate-900">£{totalCommissionPaid.toFixed(2)}</p>
+                    </div>
+                </div>
+
+                {/* Withdraw Button */}
+                <button
+                    onClick={() => setShowWithdrawModal(true)}
+                    disabled={availableBalance <= 0}
+                    className={`w-full py-4 rounded-xl font-bold text-white shadow-lg transition-all ${
+                        availableBalance > 0
+                            ? 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 active:scale-95'
+                            : 'bg-slate-300 cursor-not-allowed'
+                    }`}
+                >
+                    <div className="flex items-center justify-center gap-2">
+                        <DollarSign size={20} />
+                        <span>Withdraw Funds</span>
+                    </div>
+                </button>
+
+                {/* Transactions History */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100">
+                    <div className="p-4 border-b border-slate-100">
+                        <h2 className="font-bold text-slate-900">Transaction History</h2>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                        {transactions.length === 0 ? (
+                            <div className="p-8 text-center text-slate-400">
+                                <DollarSign size={48} className="mx-auto mb-2 opacity-50" />
+                                <p className="text-sm">No transactions yet</p>
+                            </div>
+                        ) : (
+                            transactions.map(tx => (
+                                <div key={tx.id} className="p-4 flex items-center justify-between">
+                                    <div className="flex-1">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <p className="text-sm font-bold text-slate-900 capitalize">{tx.type}</p>
+                                            {tx.status === 'pending' && (
+                                                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Pending</span>
+                                            )}
+                                            {tx.status === 'completed' && (
+                                                <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Completed</span>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-slate-500">
+                                            {tx.jobTitle || (tx.method ? `Via ${tx.method === 'bank' ? 'Bank' : 'Crypto'}` : 'Payment')}
+                                        </p>
+                                        {tx.createdAt && (
+                                            <p className="text-xs text-slate-400 mt-1">
+                                                {new Date(tx.createdAt.seconds * 1000).toLocaleDateString()}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <div className="text-right">
+                                        <p className={`text-lg font-bold ${tx.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                            {tx.amount >= 0 ? '+' : ''}£{Math.abs(tx.amount).toFixed(2)}
+                                        </p>
+                                        {tx.commission && (
+                                            <p className="text-xs text-slate-500">-£{tx.commission.toFixed(2)} fee</p>
+                                        )}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+
+            {/* Withdraw Modal */}
+            {showWithdrawModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+                        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                            <h2 className="text-xl font-bold text-slate-900">Withdraw Funds</h2>
+                            <button onClick={() => setShowWithdrawModal(false)} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+                                <X size={20} />
+                            </button>
+                        </div>
+                        
+                        <div className="p-6 space-y-4">
+                            {/* Available Balance */}
+                            <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                                <p className="text-xs font-bold text-green-700 uppercase tracking-wider mb-1">Available Balance</p>
+                                <p className="text-2xl font-bold text-green-900">£{availableBalance.toFixed(2)}</p>
+                            </div>
+
+                            {/* Withdrawal Method */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">Withdrawal Method</label>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        onClick={() => setWithdrawMethod('bank')}
+                                        className={`p-3 rounded-lg border-2 transition-all ${
+                                            withdrawMethod === 'bank'
+                                                ? 'border-orange-500 bg-orange-50'
+                                                : 'border-slate-200 bg-white'
+                                        }`}
+                                    >
+                                        <p className="text-sm font-bold">Bank Account</p>
+                                        <p className="text-xs text-slate-500">1-3 days</p>
+                                    </button>
+                                    <button
+                                        onClick={() => setWithdrawMethod('crypto')}
+                                        className={`p-3 rounded-lg border-2 transition-all ${
+                                            withdrawMethod === 'crypto'
+                                                ? 'border-orange-500 bg-orange-50'
+                                                : 'border-slate-200 bg-white'
+                                        }`}
+                                    >
+                                        <p className="text-sm font-bold">Crypto Wallet</p>
+                                        <p className="text-xs text-slate-500">Instant</p>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Amount */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">Amount (£)</label>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    max={availableBalance}
+                                    value={withdrawAmount}
+                                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                                    placeholder="0.00"
+                                    className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:outline-none text-lg font-bold"
+                                />
+                                <button
+                                    onClick={() => setWithdrawAmount(availableBalance.toString())}
+                                    className="mt-2 text-xs text-orange-600 font-bold hover:text-orange-700"
+                                >
+                                    Withdraw All
+                                </button>
+                            </div>
+
+                            {/* Info */}
+                            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                                <div className="flex items-start gap-2">
+                                    <Info size={16} className="text-blue-600 flex-shrink-0 mt-0.5" />
+                                    <p className="text-xs text-blue-800">
+                                        {withdrawMethod === 'bank'
+                                            ? 'Bank transfers typically arrive within 1-3 business days.'
+                                            : 'Crypto withdrawals are processed instantly to your wallet address.'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Buttons */}
+                            <div className="flex gap-2 pt-2">
+                                <button
+                                    onClick={() => setShowWithdrawModal(false)}
+                                    className="flex-1 py-3 px-4 rounded-lg border-2 border-slate-200 font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleWithdraw}
+                                    className="flex-1 py-3 px-4 rounded-lg bg-gradient-to-r from-green-500 to-green-600 text-white font-bold hover:from-green-600 hover:to-green-700 transition-all shadow-lg"
+                                >
+                                    Confirm Withdrawal
+                                </button>
                             </div>
                         </div>
                     </div>
