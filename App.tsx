@@ -782,14 +782,17 @@ export default function App() {
     const unsub = onSnapshot(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), (docSnap) => {
       if (docSnap.exists()) {
         setUserProfile(docSnap.data());
+        // Only redirect to feed if we're on landing page AND profile just got created
+        // This prevents navigation when updating profile from other views
         if (view === 'landing') setView('feed');
       } else {
+        // Profile doesn't exist - go to onboarding (unless already on landing)
         if (view !== 'landing') setView('onboarding');
       }
       setLoading(false);
     }, (err) => console.error(err));
     return () => unsub();
-  }, [user]);
+  }, [user, view]); // Added view as dependency
 
   // Fetch Accepted Jobs (for Unblur Logic)
   useEffect(() => {
