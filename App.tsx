@@ -5049,10 +5049,8 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         }
     };
 
-    const clearEntireDay = async (dateKey) => {
-        const newUnavailability = { ...unavailability };
-        delete newUnavailability[dateKey];
-        
+    // Helper function to update work calendar and handle empty state
+    const updateWorkCalendar = async (newUnavailability, successMessage) => {
         try {
             if (Object.keys(newUnavailability).length === 0) {
                 await updateDoc(getProfileDocRef(), {
@@ -5064,16 +5062,23 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                 });
             }
             setUnavailability(newUnavailability);
-            showToast("Day cleared", "success");
+            showToast(successMessage, "success");
         } catch (error) {
-            console.error("Error clearing day:", error);
-            showToast("Failed to clear day", "error");
+            console.error("Error updating work calendar:", error);
+            showToast("Failed to update calendar", "error");
         }
+    };
+
+    const clearEntireDay = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        delete newUnavailability[dateKey];
+        await updateWorkCalendar(newUnavailability, "Day cleared");
     };
 
     const clearEntireWeek = async (startDateKey) => {
         const newUnavailability = { ...unavailability };
-        const startDate = new Date(startDateKey + 'T00:00:00');
+        const [year, month, day] = startDateKey.split('-').map(Number);
+        const startDate = new Date(year, month - 1, day);
         
         // Clear 7 days starting from the selected date
         for (let i = 0; i < 7; i++) {
@@ -5083,56 +5088,24 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
             delete newUnavailability[dateKey];
         }
         
-        try {
-            if (Object.keys(newUnavailability).length === 0) {
-                await updateDoc(getProfileDocRef(), {
-                    workCalendar: deleteField()
-                });
-            } else {
-                await updateDoc(getProfileDocRef(), {
-                    workCalendar: newUnavailability
-                });
-            }
-            setUnavailability(newUnavailability);
-            showToast("Week cleared", "success");
-        } catch (error) {
-            console.error("Error clearing week:", error);
-            showToast("Failed to clear week", "error");
-        }
+        await updateWorkCalendar(newUnavailability, "Week cleared");
     };
 
     const clearEntireMonth = async (dateKey) => {
         const newUnavailability = { ...unavailability };
-        const [yearStr, monthStr] = dateKey.split('-');
-        const year = parseInt(yearStr, 10);
-        const month = parseInt(monthStr, 10) - 1;
+        const [year, month] = dateKey.split('-').map(Number);
         
         // Get the number of days in the month
-        const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+        const lastDayOfMonth = new Date(year, month, 0).getDate();
         
         // Clear all days in the month
         for (let day = 1; day <= lastDayOfMonth; day++) {
-            const date = new Date(year, month, day);
+            const date = new Date(year, month - 1, day);
             const key = formatDateKey(date);
             delete newUnavailability[key];
         }
         
-        try {
-            if (Object.keys(newUnavailability).length === 0) {
-                await updateDoc(getProfileDocRef(), {
-                    workCalendar: deleteField()
-                });
-            } else {
-                await updateDoc(getProfileDocRef(), {
-                    workCalendar: newUnavailability
-                });
-            }
-            setUnavailability(newUnavailability);
-            showToast("Month cleared", "success");
-        } catch (error) {
-            console.error("Error clearing month:", error);
-            showToast("Failed to clear month", "error");
-        }
+        await updateWorkCalendar(newUnavailability, "Month cleared");
     };
 
     const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentDate);
