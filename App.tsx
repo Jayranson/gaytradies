@@ -132,12 +132,23 @@ const getNextAvailableDateTime = (workCalendar) => {
     checkDate.setDate(todayDateOnly.getDate() + daysAhead);
     const dateKey = formatDateKey(checkDate);
     
-    const unavailableSlots = workCalendar[dateKey] || [];
+    const dateSlots = workCalendar[dateKey];
     
     // Check each time slot for this date
     const timeSlots = ['morning', 'afternoon', 'evening'];
     for (const slot of timeSlots) {
-      if (!unavailableSlots.includes(slot)) {
+      let isUnavailable = false;
+      
+      // Support both old format (array) and new format (object)
+      if (dateSlots) {
+        if (Array.isArray(dateSlots)) {
+          isUnavailable = dateSlots.includes(slot);
+        } else {
+          isUnavailable = !!dateSlots[slot];
+        }
+      }
+      
+      if (!isUnavailable) {
         // Found an available slot!
         // If it's today, make sure the time slot hasn't passed
         if (daysAhead === 0) {
@@ -182,8 +193,40 @@ const isCurrentlyUnavailable = (workCalendar) => {
     return false;
   }
   
-  const unavailableSlots = workCalendar[currentDateKey] || [];
-  return unavailableSlots.includes(currentTimeSlot);
+  const dateSlots = workCalendar[currentDateKey];
+  if (!dateSlots) return false;
+  
+  // Support both old format (array) and new format (object)
+  if (Array.isArray(dateSlots)) {
+    return dateSlots.includes(currentTimeSlot);
+  } else {
+    return !!dateSlots[currentTimeSlot];
+  }
+};
+
+// Get unavailability info for current time (reason and jobId if applicable)
+const getCurrentUnavailabilityInfo = (workCalendar) => {
+  if (!workCalendar || Object.keys(workCalendar).length === 0) {
+    return null;
+  }
+  
+  const now = new Date();
+  const currentDateKey = formatDateKey(now);
+  const currentTimeSlot = getCurrentTimeSlot();
+  
+  if (!currentTimeSlot) {
+    return null;
+  }
+  
+  const dateSlots = workCalendar[currentDateKey];
+  if (!dateSlots) return null;
+  
+  // Support both old format (array) and new format (object)
+  if (Array.isArray(dateSlots)) {
+    return dateSlots.includes(currentTimeSlot) ? { reason: 'manual' } : null;
+  } else {
+    return dateSlots[currentTimeSlot] || null;
+  }
 };
 
 // Format time slot for display
@@ -512,15 +555,20 @@ const ProfileModal = ({ profile, distanceKm, onClose, onConnect, onMessage, hide
                     {isTradie && (() => {
                         const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
                         if (currentlyUnavailable) {
+                            const unavailabilityInfo = getCurrentUnavailabilityInfo(profile.workCalendar);
                             const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                            const isOnJob = unavailabilityInfo?.reason === 'job';
+                            
                             if (nextAvailable) {
                                 return (
-                                    <div className="mb-6 bg-red-50 border-2 border-red-200 rounded-xl p-4">
+                                    <div className={`mb-6 border-2 rounded-xl p-4 ${isOnJob ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
                                         <div className="flex items-center gap-2">
-                                            <Ban size={18} className="text-red-600" />
+                                            <Ban size={18} className={isOnJob ? 'text-blue-600' : 'text-red-600'} />
                                             <div>
-                                                <p className="text-xs font-bold text-red-900">Not Available for Hire until:</p>
-                                                <p className="text-sm font-black text-red-700">
+                                                <p className={`text-xs font-bold ${isOnJob ? 'text-blue-900' : 'text-red-900'}`}>
+                                                    {isOnJob ? "On a job! I'll be available for Hire from:" : "Not Available for Hire until:"}
+                                                </p>
+                                                <p className={`text-sm font-black ${isOnJob ? 'text-blue-700' : 'text-red-700'}`}>
                                                     {nextAvailable.date.toLocaleDateString('en-GB', { 
                                                         weekday: 'short',
                                                         month: 'short', 
@@ -1555,8 +1603,16 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
       const effectiveTimeSlot = currentTimeSlot || 'morning';
       result = result.filter(p => {
           const workCalendar = p.workCalendar || {};
-          const unavailableSlots = workCalendar[currentDateKey] || [];
-          return !unavailableSlots.includes(effectiveTimeSlot);
+          const dateSlots = workCalendar[currentDateKey];
+          
+          if (!dateSlots) return true; // Available if no slots defined for today
+          
+          // Support both old format (array) and new format (object)
+          if (Array.isArray(dateSlots)) {
+              return !dateSlots.includes(effectiveTimeSlot);
+          } else {
+              return !dateSlots[effectiveTimeSlot];
+          }
       });
       
       // Sort: Verified first for hiring, then distance
@@ -2532,10 +2588,43 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
 
     const handleConfirmBooking = async (jobId) => {
         try {
+            const job = jobs.find(j => j.id === jobId);
             await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId), {
                 status: 'BookingConfirmed',
                 bookingConfirmedAt: serverTimestamp()
             });
+            
+            // Update tradie's work calendar to mark the booked time as unavailable
+            if (job?.tradieUid && job?.booking?.date && job?.booking?.timeSlot) {
+                const tradieRef = doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', job.tradieUid);
+                const tradieDoc = await getDoc(tradieRef);
+                const tradieData = tradieDoc.data();
+                const workCalendar = tradieData?.workCalendar || {};
+                
+                // Support both old format (array) and new format (object)
+                const dateSlots = workCalendar[job.booking.date];
+                let updatedDateSlots;
+                
+                if (Array.isArray(dateSlots)) {
+                    // Old format - convert to new format
+                    updatedDateSlots = {};
+                    dateSlots.forEach(slot => {
+                        updatedDateSlots[slot] = { reason: 'manual' };
+                    });
+                } else {
+                    updatedDateSlots = dateSlots || {};
+                }
+                
+                // Add the booked time slot
+                updatedDateSlots[job.booking.timeSlot] = { 
+                    reason: 'job', 
+                    jobId: jobId 
+                };
+                
+                await updateDoc(tradieRef, {
+                    [`workCalendar.${job.booking.date}`]: updatedDateSlots
+                });
+            }
         } catch (error) {
             console.error("Error confirming booking:", error);
         }
@@ -3966,15 +4055,20 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
                         {profile.role === 'tradie' && (() => {
                             const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
                             if (currentlyUnavailable) {
+                                const unavailabilityInfo = getCurrentUnavailabilityInfo(profile.workCalendar);
                                 const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                                const isOnJob = unavailabilityInfo?.reason === 'job';
+                                
                                 if (nextAvailable) {
                                     return (
-                                        <div className="mt-4 w-full bg-red-50 border-2 border-red-200 rounded-xl p-3">
+                                        <div className={`mt-4 w-full border-2 rounded-xl p-3 ${isOnJob ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
                                             <div className="flex items-center gap-2 justify-center">
-                                                <Ban size={16} className="text-red-600" />
+                                                <Ban size={16} className={isOnJob ? 'text-blue-600' : 'text-red-600'} />
                                                 <div className="text-center">
-                                                    <p className="text-xs font-bold text-red-900">Not Available for Hire until:</p>
-                                                    <p className="text-sm font-black text-red-700">
+                                                    <p className={`text-xs font-bold ${isOnJob ? 'text-blue-900' : 'text-red-900'}`}>
+                                                        {isOnJob ? "On a job! I'll be available for Hire from:" : "Not Available for Hire until:"}
+                                                    </p>
+                                                    <p className={`text-sm font-black ${isOnJob ? 'text-blue-700' : 'text-red-700'}`}>
                                                         {nextAvailable.date.toLocaleDateString('en-GB', { 
                                                             weekday: 'short',
                                                             month: 'short', 
@@ -4949,17 +5043,38 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
     const toggleTimeSlot = async (dateKey, timeSlot) => {
         const newUnavailability = { ...unavailability };
         
+        // Initialize date if it doesn't exist (use object format for new entries)
         if (!newUnavailability[dateKey]) {
-            newUnavailability[dateKey] = [];
+            newUnavailability[dateKey] = {};
         }
         
-        if (newUnavailability[dateKey].includes(timeSlot)) {
-            newUnavailability[dateKey] = newUnavailability[dateKey].filter(t => t !== timeSlot);
-            if (newUnavailability[dateKey].length === 0) {
-                delete newUnavailability[dateKey];
+        // Convert old array format to new object format if needed
+        if (Array.isArray(newUnavailability[dateKey])) {
+            const oldSlots = newUnavailability[dateKey];
+            newUnavailability[dateKey] = {};
+            oldSlots.forEach(slot => {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            });
+        }
+        
+        const dateSlots = newUnavailability[dateKey];
+        
+        // Toggle the slot (only allow toggling manual slots, not job slots)
+        if (dateSlots[timeSlot]) {
+            // Only allow removing manual unavailability, not job-based
+            if (dateSlots[timeSlot].reason === 'manual') {
+                delete dateSlots[timeSlot];
+            } else {
+                showToast("Cannot remove job-booked time slots", "error");
+                return;
             }
         } else {
-            newUnavailability[dateKey].push(timeSlot);
+            dateSlots[timeSlot] = { reason: 'manual' };
+        }
+        
+        // Clean up empty date entries
+        if (Object.keys(dateSlots).length === 0) {
+            delete newUnavailability[dateKey];
         }
         
         try {
@@ -4983,7 +5098,24 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
 
     const blockEntireDay = async (dateKey) => {
         const newUnavailability = { ...unavailability };
-        newUnavailability[dateKey] = ['morning', 'afternoon', 'evening'];
+        
+        // Convert to object format if needed
+        if (Array.isArray(newUnavailability[dateKey])) {
+            const oldSlots = newUnavailability[dateKey];
+            newUnavailability[dateKey] = {};
+            oldSlots.forEach(slot => {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            });
+        } else if (!newUnavailability[dateKey]) {
+            newUnavailability[dateKey] = {};
+        }
+        
+        // Block all time slots (preserve job slots)
+        ['morning', 'afternoon', 'evening'].forEach(slot => {
+            if (!newUnavailability[dateKey][slot] || newUnavailability[dateKey][slot].reason !== 'job') {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            }
+        });
         
         try {
             await updateDoc(getProfileDocRef(), {
@@ -5006,7 +5138,24 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
             const date = new Date(startDate);
             date.setDate(startDate.getDate() + i);
             const dateKey = formatDateKey(date);
-            newUnavailability[dateKey] = ['morning', 'afternoon', 'evening'];
+            
+            // Convert to object format if needed
+            if (Array.isArray(newUnavailability[dateKey])) {
+                const oldSlots = newUnavailability[dateKey];
+                newUnavailability[dateKey] = {};
+                oldSlots.forEach(slot => {
+                    newUnavailability[dateKey][slot] = { reason: 'manual' };
+                });
+            } else if (!newUnavailability[dateKey]) {
+                newUnavailability[dateKey] = {};
+            }
+            
+            // Block all time slots (preserve job slots)
+            ['morning', 'afternoon', 'evening'].forEach(slot => {
+                if (!newUnavailability[dateKey][slot] || newUnavailability[dateKey][slot].reason !== 'job') {
+                    newUnavailability[dateKey][slot] = { reason: 'manual' };
+                }
+            });
         }
         
         try {
@@ -5034,7 +5183,24 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         for (let day = 1; day <= lastDayOfMonth; day++) {
             const date = new Date(year, month, day);
             const key = formatDateKey(date);
-            newUnavailability[key] = ['morning', 'afternoon', 'evening'];
+            
+            // Convert to object format if needed
+            if (Array.isArray(newUnavailability[key])) {
+                const oldSlots = newUnavailability[key];
+                newUnavailability[key] = {};
+                oldSlots.forEach(slot => {
+                    newUnavailability[key][slot] = { reason: 'manual' };
+                });
+            } else if (!newUnavailability[key]) {
+                newUnavailability[key] = {};
+            }
+            
+            // Block all time slots (preserve job slots)
+            ['morning', 'afternoon', 'evening'].forEach(slot => {
+                if (!newUnavailability[key][slot] || newUnavailability[key][slot].reason !== 'job') {
+                    newUnavailability[key][slot] = { reason: 'manual' };
+                }
+            });
         }
         
         try {
@@ -5233,7 +5399,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
 
                 {/* QUICK BLOCK/CLEAR OPTIONS - Always visible */}
                 <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
-                    <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Block Options</h4>
+                    <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Options</h4>
                     <div className="grid grid-cols-3 gap-2 mb-3">
                         <Button
                             variant="outline"
@@ -5305,58 +5471,124 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
 
                         <div className="space-y-3">
                             {/* Morning */}
-                            <button
-                                onClick={() => toggleTimeSlot(selectedDate, 'morning')}
-                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
-                                    unavailability[selectedDate]?.includes('morning')
-                                        ? 'bg-red-50 border-red-500 text-red-900'
-                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
-                                }`}
-                            >
-                                <div className="text-left">
-                                    <div className="font-bold text-sm">Morning</div>
-                                    <div className="text-xs opacity-75">8:00 AM - 12:00 PM</div>
-                                </div>
-                                {unavailability[selectedDate]?.includes('morning') && (
-                                    <Ban size={20} className="text-red-600" />
-                                )}
-                            </button>
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('morning');
+                                    } else {
+                                        isUnavailable = !!dateSlots['morning'];
+                                        isJob = dateSlots['morning']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'morning')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Morning</div>
+                                            <div className="text-xs opacity-75">
+                                                8:00 AM - 12:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
 
                             {/* Afternoon */}
-                            <button
-                                onClick={() => toggleTimeSlot(selectedDate, 'afternoon')}
-                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
-                                    unavailability[selectedDate]?.includes('afternoon')
-                                        ? 'bg-red-50 border-red-500 text-red-900'
-                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
-                                }`}
-                            >
-                                <div className="text-left">
-                                    <div className="font-bold text-sm">Afternoon</div>
-                                    <div className="text-xs opacity-75">12:00 PM - 5:00 PM</div>
-                                </div>
-                                {unavailability[selectedDate]?.includes('afternoon') && (
-                                    <Ban size={20} className="text-red-600" />
-                                )}
-                            </button>
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('afternoon');
+                                    } else {
+                                        isUnavailable = !!dateSlots['afternoon'];
+                                        isJob = dateSlots['afternoon']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'afternoon')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Afternoon</div>
+                                            <div className="text-xs opacity-75">
+                                                12:00 PM - 5:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
 
                             {/* Evening */}
-                            <button
-                                onClick={() => toggleTimeSlot(selectedDate, 'evening')}
-                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
-                                    unavailability[selectedDate]?.includes('evening')
-                                        ? 'bg-red-50 border-red-500 text-red-900'
-                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
-                                }`}
-                            >
-                                <div className="text-left">
-                                    <div className="font-bold text-sm">Evening</div>
-                                    <div className="text-xs opacity-75">5:00 PM - 8:00 PM</div>
-                                </div>
-                                {unavailability[selectedDate]?.includes('evening') && (
-                                    <Ban size={20} className="text-red-600" />
-                                )}
-                            </button>
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('evening');
+                                    } else {
+                                        isUnavailable = !!dateSlots['evening'];
+                                        isJob = dateSlots['evening']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'evening')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Evening</div>
+                                            <div className="text-xs opacity-75">
+                                                5:00 PM - 8:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
                         </div>
                     </div>
                     );
