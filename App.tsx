@@ -103,9 +103,9 @@ const getCurrentTimeSlot = () => {
   
   if (currentHour >= 8 && currentHour < 12) {
     return 'morning';
-  } else if (currentHour >= 12 && currentHour < 17) {
+  } else if (currentHour >= 12 && currentHour < 20) {
     return 'afternoon';
-  } else if (currentHour >= 17 && currentHour < 20) {
+  } else if (currentHour >= 20 && currentHour < 23) {
     return 'evening';
   }
   
@@ -234,7 +234,7 @@ const formatTimeSlot = (timeSlot) => {
   const timeSlotMap = {
     morning: '8:00 AM',
     afternoon: '12:00 PM',
-    evening: '5:00 PM'
+    evening: '8:00 PM'
   };
   return timeSlotMap[timeSlot] || '';
 };
@@ -3561,8 +3561,8 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                                 className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:outline-none text-sm">
                                 <option value="">Select a time slot</option>
                                 <option value="Morning (8AM-12PM)">Morning (8AM-12PM)</option>
-                                <option value="Afternoon (12PM-5PM)">Afternoon (12PM-5PM)</option>
-                                <option value="Evening (5PM-8PM)">Evening (5PM-8PM)</option>
+                                <option value="Afternoon (12PM-8PM)">Afternoon (12PM-8PM)</option>
+                                <option value="Evening (8PM-11PM)">Evening (8PM-11PM)</option>
                             </select>
                         </div>
                         
@@ -5626,7 +5626,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                         <div className="text-left">
                                             <div className="font-bold text-sm">Afternoon</div>
                                             <div className="text-xs opacity-75">
-                                                12:00 PM - 5:00 PM
+                                                12:00 PM - 8:00 PM
                                                 {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
                                             </div>
                                         </div>
@@ -5666,7 +5666,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                         <div className="text-left">
                                             <div className="font-bold text-sm">Evening</div>
                                             <div className="text-xs opacity-75">
-                                                5:00 PM - 8:00 PM
+                                                8:00 PM - 11:00 PM
                                                 {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
                                             </div>
                                         </div>
