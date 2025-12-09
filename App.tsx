@@ -116,6 +116,84 @@ const formatDateKey = (date) => {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 };
 
+// Get next available date and time for a tradie based on their work calendar
+const getNextAvailableDateTime = (workCalendar) => {
+  if (!workCalendar || Object.keys(workCalendar).length === 0) {
+    return null; // No unavailability set
+  }
+  
+  const now = new Date();
+  const currentDateKey = formatDateKey(now);
+  const currentTimeSlot = getCurrentTimeSlot();
+  
+  // Sort all unavailable dates
+  const sortedDates = Object.keys(workCalendar).sort();
+  
+  // Find the last unavailable date
+  let lastUnavailableDate = null;
+  let lastUnavailableTime = null;
+  
+  for (const dateKey of sortedDates) {
+    const slots = workCalendar[dateKey];
+    if (slots && slots.length > 0) {
+      const date = new Date(dateKey + 'T00:00:00');
+      
+      // Only consider future or current dates
+      if (date >= new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        lastUnavailableDate = dateKey;
+        
+        // Determine the latest time slot
+        if (slots.includes('evening')) {
+          lastUnavailableTime = 'evening';
+        } else if (slots.includes('afternoon')) {
+          lastUnavailableTime = 'afternoon';
+        } else if (slots.includes('morning')) {
+          lastUnavailableTime = 'morning';
+        }
+      }
+    }
+  }
+  
+  if (!lastUnavailableDate) {
+    return null; // No future unavailability
+  }
+  
+  // Calculate next available date/time
+  const unavailableDate = new Date(lastUnavailableDate + 'T00:00:00');
+  let nextAvailableDate = new Date(unavailableDate);
+  let nextAvailableTime = 'morning';
+  
+  // If the entire day is blocked, next available is morning of next day
+  if (workCalendar[lastUnavailableDate]?.length === 3) {
+    nextAvailableDate.setDate(nextAvailableDate.getDate() + 1);
+    nextAvailableTime = 'morning';
+  } else if (lastUnavailableTime === 'evening') {
+    // After evening, next available is morning of next day
+    nextAvailableDate.setDate(nextAvailableDate.getDate() + 1);
+    nextAvailableTime = 'morning';
+  } else if (lastUnavailableTime === 'afternoon') {
+    nextAvailableTime = 'evening';
+  } else if (lastUnavailableTime === 'morning') {
+    nextAvailableTime = 'afternoon';
+  }
+  
+  return {
+    date: nextAvailableDate,
+    timeSlot: nextAvailableTime,
+    dateKey: formatDateKey(nextAvailableDate)
+  };
+};
+
+// Format time slot for display
+const formatTimeSlot = (timeSlot) => {
+  const timeSlotMap = {
+    morning: '8:00 AM',
+    afternoon: '12:00 PM',
+    evening: '5:00 PM'
+  };
+  return timeSlotMap[timeSlot] || '';
+};
+
 // --- UI PRIMITIVES ---
 const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false, ...props }) => {
   const baseStyle = "px-4 py-3 rounded-lg font-bold transition-all active:scale-95 flex items-center justify-center gap-2";
@@ -267,6 +345,19 @@ const ProfileTile = ({ profile, distanceKm, onOpenProfile, isCurrentUser, should
             
             {/* Verified Icon - Now Top Right */}
             {isTradie && isVerified && <VerifiedHardHat />}
+            
+            {/* Busy/DND Badge for Unavailable Tradies */}
+            {isTradie && !isCurrentUser && profile.workCalendar && Object.keys(profile.workCalendar).length > 0 && (() => {
+                const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                if (nextAvailable) {
+                    return (
+                        <div className="absolute top-1.5 left-1.5 z-20 bg-red-500 text-white p-1 rounded-full shadow-md border border-white" title="Not Available">
+                            <Ban size={12} />
+                        </div>
+                    );
+                }
+                return null;
+            })()}
 
             {/* Overlay for distance and name */}
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex flex-col justify-end p-2">
@@ -414,6 +505,32 @@ const ProfileModal = ({ profile, distanceKm, onClose, onConnect, onMessage, hide
                         <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Bio</h4>
                         <p className="text-slate-700 text-sm leading-relaxed">{profile.bio || 'No bio provided.'}</p>
                     </div>
+
+                    {/* Not Available Banner for Tradies */}
+                    {isTradie && profile.workCalendar && Object.keys(profile.workCalendar).length > 0 && (() => {
+                        const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                        if (nextAvailable) {
+                            return (
+                                <div className="mb-6 bg-red-50 border-2 border-red-200 rounded-xl p-4">
+                                    <div className="flex items-center gap-2">
+                                        <Ban size={18} className="text-red-600" />
+                                        <div>
+                                            <p className="text-xs font-bold text-red-900">Not Available for Hire until:</p>
+                                            <p className="text-sm font-black text-red-700">
+                                                {nextAvailable.date.toLocaleDateString('en-GB', { 
+                                                    weekday: 'short',
+                                                    month: 'short', 
+                                                    day: 'numeric',
+                                                    year: 'numeric'
+                                                })} at {formatTimeSlot(nextAvailable.timeSlot)}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        }
+                        return null;
+                    })()}
 
                     {isTradie && (
                         <div className="p-4 bg-orange-50 rounded-xl mb-6 border border-orange-100">
@@ -3794,6 +3911,20 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
 
                 <div className={`relative mb-3 group -mt-16`}>
                     <Avatar profile={isEditing ? editData : profile} size="xl" className="shadow-lg border-4 border-white w-24 h-24" showEditIcon={!isEditing} />
+                    
+                    {/* Busy/DND Badge */}
+                    {profile.role === 'tradie' && !isEditing && profile.workCalendar && Object.keys(profile.workCalendar).length > 0 && (() => {
+                        const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                        if (nextAvailable) {
+                            return (
+                                <div className="absolute -bottom-1 -right-1 bg-red-500 text-white p-1.5 rounded-full shadow-lg border-2 border-white" title="Not Available">
+                                    <Ban size={14} />
+                                </div>
+                            );
+                        }
+                        return null;
+                    })()}
+                    
                     {isEditing && (
                         <button onClick={() => photoInputRef.current?.click()} className="absolute bottom-0 right-0 bg-orange-500 text-white p-2 rounded-full shadow-md hover:bg-orange-600 transition-colors border-2 border-white"><Camera size={16} /></button>
                     )}
@@ -3823,6 +3954,32 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
                         <p className="text-slate-500 text-sm capitalize font-medium">{profile.role} • {profile.location}</p>
                         {profile.role === 'tradie' && <p className="font-mono text-slate-800 font-bold mt-1">£{profile.rate}/hr</p>}
                         <p className="text-center text-slate-600 mt-3 text-sm max-w-xs leading-relaxed">{profile.bio}</p>
+                        
+                        {/* Not Available Banner for Tradies */}
+                        {profile.role === 'tradie' && profile.workCalendar && Object.keys(profile.workCalendar).length > 0 && (() => {
+                            const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                            if (nextAvailable) {
+                                return (
+                                    <div className="mt-4 w-full bg-red-50 border-2 border-red-200 rounded-xl p-3">
+                                        <div className="flex items-center gap-2 justify-center">
+                                            <Ban size={16} className="text-red-600" />
+                                            <div className="text-center">
+                                                <p className="text-xs font-bold text-red-900">Not Available for Hire until:</p>
+                                                <p className="text-sm font-black text-red-700">
+                                                    {nextAvailable.date.toLocaleDateString('en-GB', { 
+                                                        weekday: 'short',
+                                                        month: 'short', 
+                                                        day: 'numeric',
+                                                        year: 'numeric'
+                                                    })} at {formatTimeSlot(nextAvailable.timeSlot)}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            }
+                            return null;
+                        })()}
                     </>
                 )}
                 
@@ -4805,6 +4962,74 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         }
     };
 
+    const blockEntireDay = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        newUnavailability[dateKey] = ['morning', 'afternoon', 'evening'];
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire day blocked", "success");
+        } catch (error) {
+            console.error("Error blocking day:", error);
+            showToast("Failed to block day", "error");
+        }
+    };
+
+    const blockEntireWeek = async (startDateKey) => {
+        const newUnavailability = { ...unavailability };
+        const startDate = new Date(startDateKey + 'T00:00:00');
+        
+        // Block 7 days starting from the selected date
+        for (let i = 0; i < 7; i++) {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + i);
+            const dateKey = formatDateKey(date);
+            newUnavailability[dateKey] = ['morning', 'afternoon', 'evening'];
+        }
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire week blocked", "success");
+        } catch (error) {
+            console.error("Error blocking week:", error);
+            showToast("Failed to block week", "error");
+        }
+    };
+
+    const blockEntireMonth = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        const [yearStr, monthStr] = dateKey.split('-');
+        const year = parseInt(yearStr, 10);
+        const month = parseInt(monthStr, 10) - 1;
+        
+        // Get the number of days in the month
+        const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+        
+        // Block all days in the month
+        for (let day = 1; day <= lastDayOfMonth; day++) {
+            const date = new Date(year, month, day);
+            const key = formatDateKey(date);
+            newUnavailability[key] = ['morning', 'afternoon', 'evening'];
+        }
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire month blocked", "success");
+        } catch (error) {
+            console.error("Error blocking month:", error);
+            showToast("Failed to block month", "error");
+        }
+    };
+
     const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentDate);
     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -5003,6 +5228,34 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                     <Ban size={20} className="text-red-600" />
                                 )}
                             </button>
+                        </div>
+
+                        {/* Block Entire Day, Week, Month buttons */}
+                        <div className="mt-6 pt-6 border-t border-slate-200">
+                            <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Block Options</h4>
+                            <div className="grid grid-cols-3 gap-2">
+                                <Button
+                                    variant="outline"
+                                    className="text-xs py-2 px-2"
+                                    onClick={() => blockEntireDay(selectedDate)}
+                                >
+                                    Entire Day
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    className="text-xs py-2 px-2"
+                                    onClick={() => blockEntireWeek(selectedDate)}
+                                >
+                                    Entire Week
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    className="text-xs py-2 px-2"
+                                    onClick={() => blockEntireMonth(selectedDate)}
+                                >
+                                    Entire Month
+                                </Button>
+                            </div>
                         </div>
 
                         {/* Quick clear button */}
