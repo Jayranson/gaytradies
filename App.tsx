@@ -4932,7 +4932,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                 {selectedDate && (() => {
                     // Parse selectedDate string safely (YYYY-MM-DD format)
                     const [yearStr, monthStr, dayStr] = selectedDate.split('-');
-                    const selectedDateObj = new Date(parseInt(yearStr), parseInt(monthStr) - 1, parseInt(dayStr));
+                    const selectedDateObj = new Date(parseInt(yearStr, 10), parseInt(monthStr, 10) - 1, parseInt(dayStr, 10));
                     
                     return (
                     <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 animate-in fade-in slide-in-from-bottom duration-300">
