@@ -155,7 +155,7 @@ const getNextAvailableDateTime = (workCalendar) => {
           const currentTimeSlot = getCurrentTimeSlot();
           const slotOrder = { morning: 0, afternoon: 1, evening: 2 };
           
-          // If current slot is null (before 8am or after 8pm), next availability is morning
+          // If current slot is null (before 8am or after 11pm), next availability is morning
           if (currentTimeSlot === null) {
             if (slot === 'morning') {
               return { date: checkDate, timeSlot: slot, dateKey };
@@ -188,7 +188,7 @@ const isCurrentlyUnavailable = (workCalendar) => {
   const currentDateKey = formatDateKey(now);
   const currentTimeSlot = getCurrentTimeSlot();
   
-  // If no current time slot (before 8am or after 8pm), consider available
+  // If no current time slot (before 8am or after 11pm), consider available
   if (!currentTimeSlot) {
     return false;
   }
