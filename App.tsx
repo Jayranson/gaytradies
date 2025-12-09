@@ -5247,28 +5247,25 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         // If it's old array format, just delete it (no job protection needed for old data)
         if (Array.isArray(dateSlots)) {
             delete newUnavailability[dateKey];
-        } else {
-            // New object format - only remove manual slots, keep job slots
-            const jobSlots = {};
-            Object.keys(dateSlots).forEach(slot => {
-                if (dateSlots[slot]?.reason === 'job') {
-                    jobSlots[slot] = dateSlots[slot];
-                }
-            });
-            
-            if (Object.keys(jobSlots).length > 0) {
-                newUnavailability[dateKey] = jobSlots;
-                showToast("Day cleared (job-booked slots preserved)", "success");
-            } else {
-                delete newUnavailability[dateKey];
-                showToast("Day cleared", "success");
-            }
-            
-            await updateWorkCalendar(newUnavailability, "");
+            await updateWorkCalendar(newUnavailability, "Day cleared");
             return;
         }
         
-        await updateWorkCalendar(newUnavailability, "Day cleared");
+        // New object format - only remove manual slots, keep job slots
+        const jobSlots = {};
+        Object.keys(dateSlots).forEach(slot => {
+            if (dateSlots[slot]?.reason === 'job') {
+                jobSlots[slot] = dateSlots[slot];
+            }
+        });
+        
+        if (Object.keys(jobSlots).length > 0) {
+            newUnavailability[dateKey] = jobSlots;
+            await updateWorkCalendar(newUnavailability, "Day cleared (job-booked slots preserved)");
+        } else {
+            delete newUnavailability[dateKey];
+            await updateWorkCalendar(newUnavailability, "Day cleared");
+        }
     };
 
     const clearEntireWeek = async (startDateKey) => {
@@ -5486,7 +5483,17 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                             const isPast = date < todayDateOnly;
                             const isToday = dateKey === todayKey;
                             const isSelected = selectedDate === dateKey;
-                            const hasUnavailability = unavailability[dateKey] && unavailability[dateKey].length > 0;
+                            
+                            // Check for unavailability (support both array and object formats)
+                            const dateSlots = unavailability[dateKey];
+                            let hasUnavailability = false;
+                            if (dateSlots) {
+                                if (Array.isArray(dateSlots)) {
+                                    hasUnavailability = dateSlots.length > 0;
+                                } else {
+                                    hasUnavailability = Object.keys(dateSlots).length > 0;
+                                }
+                            }
                             
                             return (
                                 <button
