@@ -4893,8 +4893,10 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         const unsub = onSnapshot(
             getProfileDocRef(),
             (docSnap) => {
-                if (docSnap.exists() && docSnap.data().workCalendar) {
+                if (docSnap.exists()) {
                     setUnavailability(docSnap.data().workCalendar || {});
+                } else {
+                    setUnavailability({});
                 }
             }
         );
