@@ -4733,11 +4733,14 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
     const [unavailability, setUnavailability] = useState({});
     const [selectedDate, setSelectedDate] = useState(null);
 
+    // Helper to get profile document reference
+    const getProfileDocRef = () => doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid);
+
     // Load unavailability data from Firebase
     useEffect(() => {
         if (!user || !db) return;
         const unsub = onSnapshot(
-            doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid),
+            getProfileDocRef(),
             (docSnap) => {
                 if (docSnap.exists() && docSnap.data().workCalendar) {
                     setUnavailability(docSnap.data().workCalendar || {});
@@ -4786,7 +4789,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         }
         
         try {
-            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
+            await updateDoc(getProfileDocRef(), {
                 workCalendar: newUnavailability
             });
             setUnavailability(newUnavailability);
@@ -4803,6 +4806,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
 
     const today = new Date();
     const todayKey = formatDateKey(today);
+    const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
 
     return (
         <div className="min-h-screen bg-slate-50 pb-20">
@@ -4874,7 +4878,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                             const day = i + 1;
                             const date = new Date(year, month, day);
                             const dateKey = formatDateKey(date);
-                            const isPast = date < new Date(today.getFullYear(), today.getMonth(), today.getDate());
+                            const isPast = date < todayDateOnly;
                             const isToday = dateKey === todayKey;
                             const isSelected = selectedDate === dateKey;
                             const hasUnavailability = unavailability[dateKey] && unavailability[dateKey].length > 0;
@@ -4920,11 +4924,16 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                 </div>
 
                 {/* Time Slot Selection */}
-                {selectedDate && (
+                {selectedDate && (() => {
+                    // Parse selectedDate string safely (YYYY-MM-DD format)
+                    const [yearStr, monthStr, dayStr] = selectedDate.split('-');
+                    const selectedDateObj = new Date(parseInt(yearStr), parseInt(monthStr) - 1, parseInt(dayStr));
+                    
+                    return (
                     <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 animate-in fade-in slide-in-from-bottom duration-300">
                         <h3 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
                             <Clock size={18} className="text-orange-500" />
-                            {new Date(selectedDate).toLocaleDateString('en-GB', { 
+                            {selectedDateObj.toLocaleDateString('en-GB', { 
                                 weekday: 'long', 
                                 year: 'numeric', 
                                 month: 'long', 
@@ -5000,7 +5009,7 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                     const newUnavailability = { ...unavailability };
                                     delete newUnavailability[selectedDate];
                                     try {
-                                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
+                                        await updateDoc(getProfileDocRef(), {
                                             workCalendar: newUnavailability
                                         });
                                         setUnavailability(newUnavailability);
@@ -5015,7 +5024,8 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                             </Button>
                         )}
                     </div>
-                )}
+                    );
+                })()}
             </div>
         </div>
     );
