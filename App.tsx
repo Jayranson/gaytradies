@@ -2377,7 +2377,7 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                         const tradieAmount = jobData.tradieAmount;
                         
                         // Update tradie's balance
-                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', jobData.tradieUid), {
+                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', jobData.tradieUid), {
                             'finances.onHoldBalance': increment(-tradieAmount),
                             'finances.availableBalance': increment(tradieAmount)
                         });
@@ -2389,11 +2389,10 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                             where('type', '==', 'payment')
                         );
                         const txSnapshot = await getDocs(q);
-                        txSnapshot.forEach(async (txDoc) => {
-                            await updateDoc(txDoc.ref, {
-                                status: 'completed'
-                            });
-                        });
+                        const updatePromises = txSnapshot.docs.map(txDoc => 
+                            updateDoc(txDoc.ref, { status: 'completed' })
+                        );
+                        await Promise.all(updatePromises);
                     }
                 }
             }
@@ -2681,7 +2680,7 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                 
                 // Add payment to tradie's "On Hold" balance
                 if (jobForPayment.tradieUid) {
-                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', jobForPayment.tradieUid), {
+                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', jobForPayment.tradieUid), {
                         'finances.onHoldBalance': increment(tradieAmount),
                         'finances.totalEarnings': increment(tradieAmount),
                         'finances.totalCommissionPaid': increment(commission)
@@ -2702,14 +2701,21 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                 
                 setProcessingPayment(false);
                 setShowPaymentModal(false);
+                
+                // Store jobId before clearing state
+                const completedJobId = jobForPayment.id;
                 setJobForPayment(null);
                 
                 // Automatically move to InProgress after payment
                 setTimeout(async () => {
-                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobForPayment.id), {
-                        status: 'InProgress',
-                        startedAt: serverTimestamp()
-                    });
+                    try {
+                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', completedJobId), {
+                            status: 'InProgress',
+                            startedAt: serverTimestamp()
+                        });
+                    } catch (error) {
+                        console.error("Error moving job to InProgress:", error);
+                    }
                 }, 1000);
             } catch (error) {
                 console.error("Error processing payment:", error);
@@ -4725,7 +4731,7 @@ const PaymentsCredits = ({ user, profile, onBack, showToast }) => {
             });
             
             // Update user's available balance
-            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'users', user.uid), {
+            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
                 'finances.availableBalance': increment(-amount)
             });
             
@@ -4835,7 +4841,7 @@ const PaymentsCredits = ({ user, profile, onBack, showToast }) => {
                                         <p className="text-xs text-slate-500">
                                             {tx.jobTitle || (tx.method ? `Via ${tx.method === 'bank' ? 'Bank' : 'Crypto'}` : 'Payment')}
                                         </p>
-                                        {tx.createdAt && (
+                                        {tx.createdAt?.seconds && (
                                             <p className="text-xs text-slate-400 mt-1">
                                                 {new Date(tx.createdAt.seconds * 1000).toLocaleDateString()}
                                             </p>
