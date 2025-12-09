@@ -5237,7 +5237,37 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
 
     const clearEntireDay = async (dateKey) => {
         const newUnavailability = { ...unavailability };
-        delete newUnavailability[dateKey];
+        const dateSlots = newUnavailability[dateKey];
+        
+        if (!dateSlots) {
+            showToast("No unavailability to clear", "error");
+            return;
+        }
+        
+        // If it's old array format, just delete it (no job protection needed for old data)
+        if (Array.isArray(dateSlots)) {
+            delete newUnavailability[dateKey];
+        } else {
+            // New object format - only remove manual slots, keep job slots
+            const jobSlots = {};
+            Object.keys(dateSlots).forEach(slot => {
+                if (dateSlots[slot]?.reason === 'job') {
+                    jobSlots[slot] = dateSlots[slot];
+                }
+            });
+            
+            if (Object.keys(jobSlots).length > 0) {
+                newUnavailability[dateKey] = jobSlots;
+                showToast("Day cleared (job-booked slots preserved)", "success");
+            } else {
+                delete newUnavailability[dateKey];
+                showToast("Day cleared", "success");
+            }
+            
+            await updateWorkCalendar(newUnavailability, "");
+            return;
+        }
+        
         await updateWorkCalendar(newUnavailability, "Day cleared");
     };
 
@@ -5246,15 +5276,40 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         const [year, month, day] = startDateKey.split('-').map(Number);
         const startDate = new Date(year, month - 1, day);
         
+        let hasJobSlots = false;
+        
         // Clear 7 days starting from the selected date
         for (let i = 0; i < 7; i++) {
             const date = new Date(startDate);
             date.setDate(startDate.getDate() + i);
             const dateKey = formatDateKey(date);
-            delete newUnavailability[dateKey];
+            const dateSlots = newUnavailability[dateKey];
+            
+            if (!dateSlots) continue;
+            
+            // If it's old array format, just delete it
+            if (Array.isArray(dateSlots)) {
+                delete newUnavailability[dateKey];
+            } else {
+                // New object format - only remove manual slots, keep job slots
+                const jobSlots = {};
+                Object.keys(dateSlots).forEach(slot => {
+                    if (dateSlots[slot]?.reason === 'job') {
+                        jobSlots[slot] = dateSlots[slot];
+                        hasJobSlots = true;
+                    }
+                });
+                
+                if (Object.keys(jobSlots).length > 0) {
+                    newUnavailability[dateKey] = jobSlots;
+                } else {
+                    delete newUnavailability[dateKey];
+                }
+            }
         }
         
-        await updateWorkCalendar(newUnavailability, "Week cleared");
+        const message = hasJobSlots ? "Week cleared (job-booked slots preserved)" : "Week cleared";
+        await updateWorkCalendar(newUnavailability, message);
     };
 
     const clearEntireMonth = async (dateKey) => {
@@ -5264,14 +5319,39 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         // Get the number of days in the month
         const lastDayOfMonth = new Date(year, month, 0).getDate();
         
+        let hasJobSlots = false;
+        
         // Clear all days in the month
         for (let day = 1; day <= lastDayOfMonth; day++) {
             const date = new Date(year, month - 1, day);
             const key = formatDateKey(date);
-            delete newUnavailability[key];
+            const dateSlots = newUnavailability[key];
+            
+            if (!dateSlots) continue;
+            
+            // If it's old array format, just delete it
+            if (Array.isArray(dateSlots)) {
+                delete newUnavailability[key];
+            } else {
+                // New object format - only remove manual slots, keep job slots
+                const jobSlots = {};
+                Object.keys(dateSlots).forEach(slot => {
+                    if (dateSlots[slot]?.reason === 'job') {
+                        jobSlots[slot] = dateSlots[slot];
+                        hasJobSlots = true;
+                    }
+                });
+                
+                if (Object.keys(jobSlots).length > 0) {
+                    newUnavailability[key] = jobSlots;
+                } else {
+                    delete newUnavailability[key];
+                }
+            }
         }
         
-        await updateWorkCalendar(newUnavailability, "Month cleared");
+        const message = hasJobSlots ? "Month cleared (job-booked slots preserved)" : "Month cleared";
+        await updateWorkCalendar(newUnavailability, message);
     };
 
     const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentDate);
@@ -5308,6 +5388,57 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                 Your profile will be hidden from the Hire tab during those times.
                             </p>
                         </div>
+                    </div>
+                </div>
+
+                {/* QUICK OPTIONS - Always visible, placed ABOVE calendar */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
+                    <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Options</h4>
+                    <div className="grid grid-cols-3 gap-2 mb-3">
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireDay(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Day
+                        </Button>
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireWeek(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Week
+                        </Button>
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireMonth(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Month
+                        </Button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireDay(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Day
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireWeek(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Week
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireMonth(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Month
+                        </Button>
                     </div>
                 </div>
 
@@ -5394,57 +5525,6 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                             <div className="w-4 h-4 rounded bg-slate-50 border border-slate-200" />
                             <span className="text-slate-600">Available</span>
                         </div>
-                    </div>
-                </div>
-
-                {/* QUICK BLOCK/CLEAR OPTIONS - Always visible */}
-                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
-                    <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Options</h4>
-                    <div className="grid grid-cols-3 gap-2 mb-3">
-                        <Button
-                            variant="outline"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? blockEntireDay(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Block Day
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? blockEntireWeek(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Block Week
-                        </Button>
-                        <Button
-                            variant="outline"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? blockEntireMonth(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Block Month
-                        </Button>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                        <Button
-                            variant="ghost"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? clearEntireDay(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Clear Day
-                        </Button>
-                        <Button
-                            variant="ghost"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? clearEntireWeek(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Clear Week
-                        </Button>
-                        <Button
-                            variant="ghost"
-                            className="text-xs py-2 px-2"
-                            onClick={() => selectedDate ? clearEntireMonth(selectedDate) : showToast("Select a date first", "error")}
-                        >
-                            Clear Month
-                        </Button>
                     </div>
                 </div>
 
