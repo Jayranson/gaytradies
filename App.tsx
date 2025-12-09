@@ -35,6 +35,7 @@ import {
   addDoc, 
   updateDoc, 
   deleteDoc,
+  deleteField,
   serverTimestamp,
   query,
   orderBy, 
@@ -4935,9 +4936,16 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         }
         
         try {
-            await updateDoc(getProfileDocRef(), {
-                workCalendar: newUnavailability
-            });
+            // If workCalendar is now empty, remove the field entirely from Firebase
+            if (Object.keys(newUnavailability).length === 0) {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: deleteField()
+                });
+            } else {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: newUnavailability
+                });
+            }
             setUnavailability(newUnavailability);
             showToast("Availability updated", "success");
         } catch (error) {
@@ -5251,9 +5259,16 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
                                     const newUnavailability = { ...unavailability };
                                     delete newUnavailability[selectedDate];
                                     try {
-                                        await updateDoc(getProfileDocRef(), {
-                                            workCalendar: newUnavailability
-                                        });
+                                        // If workCalendar is now empty, remove the field entirely from Firebase
+                                        if (Object.keys(newUnavailability).length === 0) {
+                                            await updateDoc(getProfileDocRef(), {
+                                                workCalendar: deleteField()
+                                            });
+                                        } else {
+                                            await updateDoc(getProfileDocRef(), {
+                                                workCalendar: newUnavailability
+                                            });
+                                        }
                                         setUnavailability(newUnavailability);
                                         showToast("Date cleared", "success");
                                     } catch (error) {
