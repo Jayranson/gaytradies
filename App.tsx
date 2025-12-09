@@ -96,6 +96,26 @@ const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
   return d < 0.01 ? 0 : d; 
 };
 
+// Get current time slot based on hour
+const getCurrentTimeSlot = () => {
+  const currentHour = new Date().getHours();
+  
+  if (currentHour >= 8 && currentHour < 12) {
+    return 'morning';
+  } else if (currentHour >= 12 && currentHour < 17) {
+    return 'afternoon';
+  } else if (currentHour >= 17 && currentHour < 20) {
+    return 'evening';
+  }
+  
+  return null;
+};
+
+// Format date as YYYY-MM-DD
+const formatDateKey = (date) => {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
 // --- UI PRIMITIVES ---
 const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false, ...props }) => {
   const baseStyle = "px-4 py-3 rounded-lg font-bold transition-all active:scale-95 flex items-center justify-center gap-2";
@@ -1403,19 +1423,8 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
       }
       
       // Filter out tradies who are unavailable at the current time
-      const now = new Date();
-      const currentDateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      const currentHour = now.getHours();
-      
-      // Determine current time slot
-      let currentTimeSlot = null;
-      if (currentHour >= 8 && currentHour < 12) {
-          currentTimeSlot = 'morning';
-      } else if (currentHour >= 12 && currentHour < 17) {
-          currentTimeSlot = 'afternoon';
-      } else if (currentHour >= 17 && currentHour < 20) {
-          currentTimeSlot = 'evening';
-      }
+      const currentDateKey = formatDateKey(new Date());
+      const currentTimeSlot = getCurrentTimeSlot();
       
       // Filter out unavailable tradies
       if (currentTimeSlot) {
@@ -4760,10 +4769,6 @@ const WorkCalendar = ({ user, profile, onBack, showToast }) => {
         const startingDayOfWeek = firstDay.getDay();
         
         return { daysInMonth, startingDayOfWeek, year, month };
-    };
-
-    const formatDateKey = (date) => {
-        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     };
 
     const navigateMonth = (direction) => {
