@@ -123,65 +123,47 @@ const getNextAvailableDateTime = (workCalendar) => {
   }
   
   const now = new Date();
-  const currentDateKey = formatDateKey(now);
-  const currentTimeSlot = getCurrentTimeSlot();
+  const todayDateOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   
-  // Sort all unavailable dates
-  const sortedDates = Object.keys(workCalendar).sort();
-  
-  // Find the last unavailable date
-  let lastUnavailableDate = null;
-  let lastUnavailableTime = null;
-  
-  for (const dateKey of sortedDates) {
-    const slots = workCalendar[dateKey];
-    if (slots && slots.length > 0) {
-      const date = new Date(dateKey + 'T00:00:00');
-      
-      // Only consider future or current dates
-      if (date >= new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
-        lastUnavailableDate = dateKey;
-        
-        // Determine the latest time slot
-        if (slots.includes('evening')) {
-          lastUnavailableTime = 'evening';
-        } else if (slots.includes('afternoon')) {
-          lastUnavailableTime = 'afternoon';
-        } else if (slots.includes('morning')) {
-          lastUnavailableTime = 'morning';
+  // Check the next 365 days to find first available slot
+  for (let daysAhead = 0; daysAhead < 365; daysAhead++) {
+    const checkDate = new Date(todayDateOnly);
+    checkDate.setDate(todayDateOnly.getDate() + daysAhead);
+    const dateKey = formatDateKey(checkDate);
+    
+    const unavailableSlots = workCalendar[dateKey] || [];
+    
+    // Check each time slot for this date
+    const timeSlots = ['morning', 'afternoon', 'evening'];
+    for (const slot of timeSlots) {
+      if (!unavailableSlots.includes(slot)) {
+        // Found an available slot!
+        // If it's today, make sure the time slot hasn't passed
+        if (daysAhead === 0) {
+          const currentTimeSlot = getCurrentTimeSlot();
+          const slotOrder = { morning: 0, afternoon: 1, evening: 2 };
+          
+          // If current slot is null (before 8am or after 8pm), next availability is morning
+          if (currentTimeSlot === null) {
+            if (slot === 'morning') {
+              return { date: checkDate, timeSlot: slot, dateKey };
+            }
+            continue; // Skip slots before morning
+          }
+          
+          // Only consider future slots today
+          if (slotOrder[slot] <= slotOrder[currentTimeSlot]) {
+            continue;
+          }
         }
+        
+        return { date: checkDate, timeSlot: slot, dateKey };
       }
     }
   }
   
-  if (!lastUnavailableDate) {
-    return null; // No future unavailability
-  }
-  
-  // Calculate next available date/time
-  const unavailableDate = new Date(lastUnavailableDate + 'T00:00:00');
-  let nextAvailableDate = new Date(unavailableDate);
-  let nextAvailableTime = 'morning';
-  
-  // If the entire day is blocked, next available is morning of next day
-  if (workCalendar[lastUnavailableDate]?.length === 3) {
-    nextAvailableDate.setDate(nextAvailableDate.getDate() + 1);
-    nextAvailableTime = 'morning';
-  } else if (lastUnavailableTime === 'evening') {
-    // After evening, next available is morning of next day
-    nextAvailableDate.setDate(nextAvailableDate.getDate() + 1);
-    nextAvailableTime = 'morning';
-  } else if (lastUnavailableTime === 'afternoon') {
-    nextAvailableTime = 'evening';
-  } else if (lastUnavailableTime === 'morning') {
-    nextAvailableTime = 'afternoon';
-  }
-  
-  return {
-    date: nextAvailableDate,
-    timeSlot: nextAvailableTime,
-    dateKey: formatDateKey(nextAvailableDate)
-  };
+  // If we've checked 365 days and found nothing, they're unavailable indefinitely
+  return null;
 };
 
 // Format time slot for display
@@ -1543,14 +1525,13 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
       const currentDateKey = formatDateKey(new Date());
       const currentTimeSlot = getCurrentTimeSlot();
       
-      // Filter out unavailable tradies
-      if (currentTimeSlot) {
-          result = result.filter(p => {
-              const workCalendar = p.workCalendar || {};
-              const unavailableSlots = workCalendar[currentDateKey] || [];
-              return !unavailableSlots.includes(currentTimeSlot);
-          });
-      }
+      // Filter out unavailable tradies (use 'morning' as default for off-hours)
+      const effectiveTimeSlot = currentTimeSlot || 'morning';
+      result = result.filter(p => {
+          const workCalendar = p.workCalendar || {};
+          const unavailableSlots = workCalendar[currentDateKey] || [];
+          return !unavailableSlots.includes(effectiveTimeSlot);
+      });
       
       // Sort: Verified first for hiring, then distance
       result.sort((a, b) => {
