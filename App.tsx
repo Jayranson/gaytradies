@@ -7,7 +7,8 @@ import {
   ClipboardList, AlertCircle, Camera, Filter, Image as ImageIcon, Navigation,
   Ban, Star as StarIcon, Flag, Phone, Lock, Mail, ShoppingBag, ShoppingCart, UploadCloud,
   Bell, Eye, EyeOff, Shield, UserX, Clock, Trash2, FileText, Info, 
-  AlertTriangle, Users, BookOpen, ExternalLink, ChevronRight, Globe, UserCheck
+  AlertTriangle, Users, BookOpen, ExternalLink, ChevronRight, Globe, UserCheck, Calendar,
+  ChevronLeft, ChevronRight as ChevronRightIcon
 } from 'lucide-react';
 
 // Firebase Imports
@@ -756,6 +757,7 @@ export default function App() {
         }
       }} showToast={showToast} onEnableLocation={updateLocation} onNavigate={setView} />;
       case 'settings': return <SettingsScreen user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
+      case 'workCalendar': return <WorkCalendar user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
       case 'safety': return <SafetyCentre user={user} onBack={() => setView('profile')} showToast={showToast} />;
       case 'admin': return <AdminPanel user={user} onBack={() => setView('profile')} showToast={showToast} />;
       default: return <Feed user={user} activeTab={activeTab} setActiveTab={setActiveTab} />;
@@ -1399,6 +1401,31 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
           const search = manualLocation.toLowerCase();
           result = result.filter(p => p.location?.toLowerCase().includes(search));
       }
+      
+      // Filter out tradies who are unavailable at the current time
+      const now = new Date();
+      const currentDateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const currentHour = now.getHours();
+      
+      // Determine current time slot
+      let currentTimeSlot = null;
+      if (currentHour >= 8 && currentHour < 12) {
+          currentTimeSlot = 'morning';
+      } else if (currentHour >= 12 && currentHour < 17) {
+          currentTimeSlot = 'afternoon';
+      } else if (currentHour >= 17 && currentHour < 20) {
+          currentTimeSlot = 'evening';
+      }
+      
+      // Filter out unavailable tradies
+      if (currentTimeSlot) {
+          result = result.filter(p => {
+              const workCalendar = p.workCalendar || {};
+              const unavailableSlots = workCalendar[currentDateKey] || [];
+              return !unavailableSlots.includes(currentTimeSlot);
+          });
+      }
+      
       // Sort: Verified first for hiring, then distance
       result.sort((a, b) => {
           if (a.verified !== b.verified) return b.verified ? 1 : -1;
@@ -3810,6 +3837,9 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
             </div>
             <div className="space-y-2 mb-8">
                 <ProfileLink icon={Settings} label="Settings" onClick={() => onNavigate('settings')} />
+                {profile.role === 'tradie' && (
+                    <ProfileLink icon={Calendar} label="Work Calendar" onClick={() => onNavigate('workCalendar')} />
+                )}
                 <ProfileLink icon={DollarSign} label="Payments & Credits" onClick={() => {}} />
                 <ProfileLink icon={ShieldCheck} label="Safety Centre" onClick={() => onNavigate('safety')} />
                 <button onClick={onLogout} className="w-full p-4 flex items-center gap-3 text-red-500 hover:bg-red-50 rounded-xl transition-colors font-bold"><LogOut size={20} /> <span className="font-medium">Sign Out</span></button>
@@ -4693,6 +4723,300 @@ const SafetyCentre = ({ user, onBack, showToast }) => {
                     </div>
                 </div>
             )}
+        </div>
+    );
+};
+
+// --- WORK CALENDAR COMPONENT ---
+const WorkCalendar = ({ user, profile, onBack, showToast }) => {
+    const [currentDate, setCurrentDate] = useState(new Date());
+    const [unavailability, setUnavailability] = useState({});
+    const [selectedDate, setSelectedDate] = useState(null);
+
+    // Load unavailability data from Firebase
+    useEffect(() => {
+        if (!user || !db) return;
+        const unsub = onSnapshot(
+            doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid),
+            (docSnap) => {
+                if (docSnap.exists() && docSnap.data().workCalendar) {
+                    setUnavailability(docSnap.data().workCalendar || {});
+                }
+            }
+        );
+        return () => unsub();
+    }, [user]);
+
+    // Calendar helper functions
+    const getDaysInMonth = (date) => {
+        const year = date.getFullYear();
+        const month = date.getMonth();
+        const firstDay = new Date(year, month, 1);
+        const lastDay = new Date(year, month + 1, 0);
+        const daysInMonth = lastDay.getDate();
+        const startingDayOfWeek = firstDay.getDay();
+        
+        return { daysInMonth, startingDayOfWeek, year, month };
+    };
+
+    const formatDateKey = (date) => {
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    };
+
+    const navigateMonth = (direction) => {
+        const newDate = new Date(currentDate);
+        newDate.setMonth(currentDate.getMonth() + direction);
+        setCurrentDate(newDate);
+    };
+
+    const toggleTimeSlot = async (dateKey, timeSlot) => {
+        const newUnavailability = { ...unavailability };
+        
+        if (!newUnavailability[dateKey]) {
+            newUnavailability[dateKey] = [];
+        }
+        
+        if (newUnavailability[dateKey].includes(timeSlot)) {
+            newUnavailability[dateKey] = newUnavailability[dateKey].filter(t => t !== timeSlot);
+            if (newUnavailability[dateKey].length === 0) {
+                delete newUnavailability[dateKey];
+            }
+        } else {
+            newUnavailability[dateKey].push(timeSlot);
+        }
+        
+        try {
+            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Availability updated", "success");
+        } catch (error) {
+            console.error("Error updating availability:", error);
+            showToast("Failed to update availability", "error");
+        }
+    };
+
+    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentDate);
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    const today = new Date();
+    const todayKey = formatDateKey(today);
+
+    return (
+        <div className="min-h-screen bg-slate-50 pb-20">
+            {/* Header */}
+            <div className="bg-orange-500 text-white sticky top-0 z-40">
+                <div className="p-4 flex items-center gap-3">
+                    <button onClick={onBack}><ArrowRight className="rotate-180" size={20} /></button>
+                    <div className="flex-1">
+                        <h1 className="text-xl font-bold">Work Calendar</h1>
+                        <p className="text-xs opacity-90">Manage your availability</p>
+                    </div>
+                    <Calendar size={24} />
+                </div>
+            </div>
+
+            <div className="p-4">
+                {/* Info Banner */}
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+                    <div className="flex items-start gap-3">
+                        <Info size={20} className="text-blue-600 flex-shrink-0 mt-0.5" />
+                        <div>
+                            <h3 className="font-bold text-sm text-blue-900 mb-1">How it works</h3>
+                            <p className="text-xs text-blue-800 leading-relaxed">
+                                Mark dates and times when you're <strong>not available</strong> for hire. 
+                                Your profile will be hidden from the Hire tab during those times.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Calendar Navigation */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
+                    <div className="flex items-center justify-between mb-4">
+                        <button
+                            onClick={() => navigateMonth(-1)}
+                            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                        >
+                            <ChevronLeft size={24} className="text-slate-600" />
+                        </button>
+                        <h2 className="text-lg font-bold text-slate-900">
+                            {monthNames[month]} {year}
+                        </h2>
+                        <button
+                            onClick={() => navigateMonth(1)}
+                            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                        >
+                            <ChevronRightIcon size={24} className="text-slate-600" />
+                        </button>
+                    </div>
+
+                    {/* Day names */}
+                    <div className="grid grid-cols-7 gap-1 mb-2">
+                        {dayNames.map(day => (
+                            <div key={day} className="text-center text-xs font-bold text-slate-500 py-1">
+                                {day}
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Calendar grid */}
+                    <div className="grid grid-cols-7 gap-1">
+                        {/* Empty cells for days before month starts */}
+                        {Array.from({ length: startingDayOfWeek }).map((_, i) => (
+                            <div key={`empty-${i}`} className="aspect-square" />
+                        ))}
+                        
+                        {/* Days of the month */}
+                        {Array.from({ length: daysInMonth }).map((_, i) => {
+                            const day = i + 1;
+                            const date = new Date(year, month, day);
+                            const dateKey = formatDateKey(date);
+                            const isPast = date < new Date(today.getFullYear(), today.getMonth(), today.getDate());
+                            const isToday = dateKey === todayKey;
+                            const isSelected = selectedDate === dateKey;
+                            const hasUnavailability = unavailability[dateKey] && unavailability[dateKey].length > 0;
+                            
+                            return (
+                                <button
+                                    key={day}
+                                    onClick={() => !isPast && setSelectedDate(dateKey)}
+                                    disabled={isPast}
+                                    className={`aspect-square rounded-lg flex items-center justify-center text-sm font-bold transition-all ${
+                                        isPast
+                                            ? 'text-slate-300 cursor-not-allowed'
+                                            : isSelected
+                                            ? 'bg-orange-500 text-white shadow-md'
+                                            : isToday
+                                            ? 'bg-blue-100 text-blue-900 border-2 border-blue-500'
+                                            : hasUnavailability
+                                            ? 'bg-red-100 text-red-900 border border-red-300'
+                                            : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
+                                    }`}
+                                >
+                                    {day}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    {/* Legend */}
+                    <div className="mt-4 pt-4 border-t border-slate-100 flex flex-wrap gap-3 text-xs">
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-blue-100 border-2 border-blue-500" />
+                            <span className="text-slate-600">Today</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-red-100 border border-red-300" />
+                            <span className="text-slate-600">Unavailable</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-slate-50 border border-slate-200" />
+                            <span className="text-slate-600">Available</span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Time Slot Selection */}
+                {selectedDate && (
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 animate-in fade-in slide-in-from-bottom duration-300">
+                        <h3 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
+                            <Clock size={18} className="text-orange-500" />
+                            {new Date(selectedDate).toLocaleDateString('en-GB', { 
+                                weekday: 'long', 
+                                year: 'numeric', 
+                                month: 'long', 
+                                day: 'numeric' 
+                            })}
+                        </h3>
+                        <p className="text-xs text-slate-500 mb-4">
+                            Select time slots when you are <strong>NOT available</strong>
+                        </p>
+
+                        <div className="space-y-3">
+                            {/* Morning */}
+                            <button
+                                onClick={() => toggleTimeSlot(selectedDate, 'morning')}
+                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                    unavailability[selectedDate]?.includes('morning')
+                                        ? 'bg-red-50 border-red-500 text-red-900'
+                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                }`}
+                            >
+                                <div className="text-left">
+                                    <div className="font-bold text-sm">Morning</div>
+                                    <div className="text-xs opacity-75">8:00 AM - 12:00 PM</div>
+                                </div>
+                                {unavailability[selectedDate]?.includes('morning') && (
+                                    <Ban size={20} className="text-red-600" />
+                                )}
+                            </button>
+
+                            {/* Afternoon */}
+                            <button
+                                onClick={() => toggleTimeSlot(selectedDate, 'afternoon')}
+                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                    unavailability[selectedDate]?.includes('afternoon')
+                                        ? 'bg-red-50 border-red-500 text-red-900'
+                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                }`}
+                            >
+                                <div className="text-left">
+                                    <div className="font-bold text-sm">Afternoon</div>
+                                    <div className="text-xs opacity-75">12:00 PM - 5:00 PM</div>
+                                </div>
+                                {unavailability[selectedDate]?.includes('afternoon') && (
+                                    <Ban size={20} className="text-red-600" />
+                                )}
+                            </button>
+
+                            {/* Evening */}
+                            <button
+                                onClick={() => toggleTimeSlot(selectedDate, 'evening')}
+                                className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                    unavailability[selectedDate]?.includes('evening')
+                                        ? 'bg-red-50 border-red-500 text-red-900'
+                                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                }`}
+                            >
+                                <div className="text-left">
+                                    <div className="font-bold text-sm">Evening</div>
+                                    <div className="text-xs opacity-75">5:00 PM - 8:00 PM</div>
+                                </div>
+                                {unavailability[selectedDate]?.includes('evening') && (
+                                    <Ban size={20} className="text-red-600" />
+                                )}
+                            </button>
+                        </div>
+
+                        {/* Quick clear button */}
+                        {unavailability[selectedDate] && unavailability[selectedDate].length > 0 && (
+                            <Button
+                                variant="ghost"
+                                className="w-full mt-3 text-sm"
+                                onClick={async () => {
+                                    const newUnavailability = { ...unavailability };
+                                    delete newUnavailability[selectedDate];
+                                    try {
+                                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
+                                            workCalendar: newUnavailability
+                                        });
+                                        setUnavailability(newUnavailability);
+                                        showToast("Date cleared", "success");
+                                    } catch (error) {
+                                        console.error("Error clearing date:", error);
+                                        showToast("Failed to clear date", "error");
+                                    }
+                                }}
+                            >
+                                Clear All for This Day
+                            </Button>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
