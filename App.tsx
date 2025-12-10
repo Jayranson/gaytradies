@@ -7,7 +7,8 @@ import {
   ClipboardList, AlertCircle, Camera, Filter, Image as ImageIcon, Navigation,
   Ban, Star as StarIcon, Flag, Phone, Lock, Mail, ShoppingBag, ShoppingCart, UploadCloud,
   Bell, Eye, EyeOff, Shield, UserX, Clock, Trash2, FileText, Info, 
-  AlertTriangle, Users, BookOpen, ExternalLink, ChevronRight, Globe, UserCheck
+  AlertTriangle, Users, BookOpen, ExternalLink, ChevronRight, Globe, UserCheck, Calendar,
+  ChevronLeft, ChevronRight as ChevronRightIcon
 } from 'lucide-react';
 
 // Firebase Imports
@@ -34,13 +35,15 @@ import {
   addDoc, 
   updateDoc, 
   deleteDoc,
+  deleteField,
   serverTimestamp,
   query,
   orderBy, 
   limit,
   where,
   increment,
-  arrayUnion
+  arrayUnion,
+  writeBatch
 } from 'firebase/firestore';
 
 // --- CONFIG & INIT ---
@@ -93,6 +96,148 @@ const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   const d = R * c;
   return d < 0.01 ? 0 : d; 
+};
+
+// Get current time slot based on hour
+const getCurrentTimeSlot = () => {
+  const currentHour = new Date().getHours();
+  
+  if (currentHour >= 8 && currentHour < 12) {
+    return 'morning';
+  } else if (currentHour >= 12 && currentHour < 20) {
+    return 'afternoon';
+  } else if (currentHour >= 20 && currentHour < 23) {
+    return 'evening';
+  }
+  
+  return null;
+};
+
+// Format date as YYYY-MM-DD
+const formatDateKey = (date) => {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+// Get next available date and time for a tradie based on their work calendar
+const getNextAvailableDateTime = (workCalendar) => {
+  if (!workCalendar || Object.keys(workCalendar).length === 0) {
+    return null; // No unavailability set
+  }
+  
+  const now = new Date();
+  const todayDateOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  
+  // Check the next 365 days to find first available slot
+  for (let daysAhead = 0; daysAhead < 365; daysAhead++) {
+    const checkDate = new Date(todayDateOnly);
+    checkDate.setDate(todayDateOnly.getDate() + daysAhead);
+    const dateKey = formatDateKey(checkDate);
+    
+    const dateSlots = workCalendar[dateKey];
+    
+    // Check each time slot for this date
+    const timeSlots = ['morning', 'afternoon', 'evening'];
+    for (const slot of timeSlots) {
+      let isUnavailable = false;
+      
+      // Support both old format (array) and new format (object)
+      if (dateSlots) {
+        if (Array.isArray(dateSlots)) {
+          isUnavailable = dateSlots.includes(slot);
+        } else {
+          isUnavailable = !!dateSlots[slot];
+        }
+      }
+      
+      if (!isUnavailable) {
+        // Found an available slot!
+        // If it's today, make sure the time slot hasn't passed
+        if (daysAhead === 0) {
+          const currentTimeSlot = getCurrentTimeSlot();
+          const slotOrder = { morning: 0, afternoon: 1, evening: 2 };
+          
+          // If current slot is null (before 8am or after 11pm), next availability is morning
+          if (currentTimeSlot === null) {
+            if (slot === 'morning') {
+              return { date: checkDate, timeSlot: slot, dateKey };
+            }
+            continue; // Skip slots before morning
+          }
+          
+          // Only consider future slots today
+          if (slotOrder[slot] <= slotOrder[currentTimeSlot]) {
+            continue;
+          }
+        }
+        
+        return { date: checkDate, timeSlot: slot, dateKey };
+      }
+    }
+  }
+  
+  // If we've checked 365 days and found nothing, they're unavailable indefinitely
+  return null;
+};
+
+// Check if tradie is CURRENTLY unavailable (right now)
+const isCurrentlyUnavailable = (workCalendar) => {
+  if (!workCalendar || Object.keys(workCalendar).length === 0) {
+    return false; // No unavailability set, so available
+  }
+  
+  const now = new Date();
+  const currentDateKey = formatDateKey(now);
+  const currentTimeSlot = getCurrentTimeSlot();
+  
+  // If no current time slot (before 8am or after 11pm), consider available
+  if (!currentTimeSlot) {
+    return false;
+  }
+  
+  const dateSlots = workCalendar[currentDateKey];
+  if (!dateSlots) return false;
+  
+  // Support both old format (array) and new format (object)
+  if (Array.isArray(dateSlots)) {
+    return dateSlots.includes(currentTimeSlot);
+  } else {
+    return !!dateSlots[currentTimeSlot];
+  }
+};
+
+// Get unavailability info for current time (reason and jobId if applicable)
+const getCurrentUnavailabilityInfo = (workCalendar) => {
+  if (!workCalendar || Object.keys(workCalendar).length === 0) {
+    return null;
+  }
+  
+  const now = new Date();
+  const currentDateKey = formatDateKey(now);
+  const currentTimeSlot = getCurrentTimeSlot();
+  
+  if (!currentTimeSlot) {
+    return null;
+  }
+  
+  const dateSlots = workCalendar[currentDateKey];
+  if (!dateSlots) return null;
+  
+  // Support both old format (array) and new format (object)
+  if (Array.isArray(dateSlots)) {
+    return dateSlots.includes(currentTimeSlot) ? { reason: 'manual' } : null;
+  } else {
+    return dateSlots[currentTimeSlot] || null;
+  }
+};
+
+// Format time slot for display
+const formatTimeSlot = (timeSlot) => {
+  const timeSlotMap = {
+    morning: '8:00 AM',
+    afternoon: '12:00 PM',
+    evening: '8:00 PM'
+  };
+  return timeSlotMap[timeSlot] || '';
 };
 
 // --- UI PRIMITIVES ---
@@ -246,6 +391,19 @@ const ProfileTile = ({ profile, distanceKm, onOpenProfile, isCurrentUser, should
             
             {/* Verified Icon - Now Top Right */}
             {isTradie && isVerified && <VerifiedHardHat />}
+            
+            {/* Busy/DND Badge for Unavailable Tradies */}
+            {isTradie && !isCurrentUser && (() => {
+                const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
+                if (currentlyUnavailable) {
+                    return (
+                        <div className="absolute top-1.5 left-1.5 z-20 bg-red-500 text-white p-1 rounded-full shadow-md border border-white" title="Currently Unavailable">
+                            <Ban size={12} />
+                        </div>
+                    );
+                }
+                return null;
+            })()}
 
             {/* Overlay for distance and name */}
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent flex flex-col justify-end p-2">
@@ -393,6 +551,40 @@ const ProfileModal = ({ profile, distanceKm, onClose, onConnect, onMessage, hide
                         <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Bio</h4>
                         <p className="text-slate-700 text-sm leading-relaxed">{profile.bio || 'No bio provided.'}</p>
                     </div>
+
+                    {/* Not Available Banner for Tradies */}
+                    {isTradie && (() => {
+                        const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
+                        if (currentlyUnavailable) {
+                            const unavailabilityInfo = getCurrentUnavailabilityInfo(profile.workCalendar);
+                            const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                            const isOnJob = unavailabilityInfo?.reason === 'job';
+                            
+                            if (nextAvailable) {
+                                return (
+                                    <div className={`mb-6 border-2 rounded-xl p-4 ${isOnJob ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
+                                        <div className="flex items-center gap-2">
+                                            <Ban size={18} className={isOnJob ? 'text-blue-600' : 'text-red-600'} />
+                                            <div>
+                                                <p className={`text-xs font-bold ${isOnJob ? 'text-blue-900' : 'text-red-900'}`}>
+                                                    {isOnJob ? "On a job! I'll be available for Hire from:" : "Not Available for Hire until:"}
+                                                </p>
+                                                <p className={`text-sm font-black ${isOnJob ? 'text-blue-700' : 'text-red-700'}`}>
+                                                    {nextAvailable.date.toLocaleDateString('en-GB', { 
+                                                        weekday: 'short',
+                                                        month: 'short', 
+                                                        day: 'numeric',
+                                                        year: 'numeric'
+                                                    })} at {formatTimeSlot(nextAvailable.timeSlot)}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            }
+                        }
+                        return null;
+                    })()}
 
                     {isTradie && (
                         <div className="p-4 bg-orange-50 rounded-xl mb-6 border border-orange-100">
@@ -662,14 +854,17 @@ export default function App() {
     const unsub = onSnapshot(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), (docSnap) => {
       if (docSnap.exists()) {
         setUserProfile(docSnap.data());
+        // Only redirect to feed if we're on landing page AND profile just got created
+        // This prevents navigation when updating profile from other views
         if (view === 'landing') setView('feed');
       } else {
+        // Profile doesn't exist - go to onboarding (unless already on landing)
         if (view !== 'landing') setView('onboarding');
       }
       setLoading(false);
     }, (err) => console.error(err));
     return () => unsub();
-  }, [user]);
+  }, [user, view]); // Added view as dependency
 
   // Fetch Accepted Jobs (for Unblur Logic)
   useEffect(() => {
@@ -756,6 +951,8 @@ export default function App() {
         }
       }} showToast={showToast} onEnableLocation={updateLocation} onNavigate={setView} />;
       case 'settings': return <SettingsScreen user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
+      case 'workCalendar': return <WorkCalendar user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
+      case 'paymentsCredits': return <PaymentsCredits user={user} profile={userProfile} onBack={() => setView('profile')} showToast={showToast} />;
       case 'safety': return <SafetyCentre user={user} onBack={() => setView('profile')} showToast={showToast} />;
       case 'admin': return <AdminPanel user={user} onBack={() => setView('profile')} showToast={showToast} />;
       default: return <Feed user={user} activeTab={activeTab} setActiveTab={setActiveTab} />;
@@ -1347,12 +1544,14 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
       // Filter out blocked users
       allProfiles = allProfiles.filter(p => !blockedUserIds.has(p.uid));
       
-      // Apply incognito mode - hide profiles with incognito enabled (except current user)
-      allProfiles = allProfiles.filter(p => p.uid === user?.uid || !p.incognitoMode);
+      // Apply incognito mode - hide profiles with incognito enabled
+      // This hides the profile from all feeds including user's own feed
+      allProfiles = allProfiles.filter(p => !p.incognitoMode);
       
       // Apply job-only visibility filter for social tab
+      // Users with jobOnlyVisibility should only appear in hiring tab, not social
       if (activeTab === 'dating') {
-        allProfiles = allProfiles.filter(p => p.uid === user?.uid || !p.jobOnlyVisibility);
+        allProfiles = allProfiles.filter(p => !p.jobOnlyVisibility);
       }
       
       // Calculate distances for all profiles first
@@ -1380,6 +1579,12 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
         .filter(p => !socialFilter.trade || p.trade === socialFilter.trade)
         .filter(p => p.age >= socialFilter.minAge && p.age <= socialFilter.maxAge)
         .filter(p => !p.distanceKm || p.distanceKm <= socialFilter.distance)
+        // Apply user's "Verified Only" privacy setting
+        .filter(p => {
+            if (p.uid === user?.uid) return true; // Always show current user
+            if (!userProfile?.verifiedOnly) return true; // Setting not enabled
+            return p.verified === true; // Only show verified profiles
+        })
         .sort((a, b) => {
             // Current user's profile always appears first
             if (a.uid === user?.uid) return -1;
@@ -1389,7 +1594,7 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
             const bDist = b.distanceKm || 99999;
             return aDist - bDist; // Smaller distances first (top), larger distances last (bottom)
         });
-  }, [profiles, socialFilter, user]);
+  }, [profiles, socialFilter, user, userProfile]);
 
   // Hiring Filter Logic (GT1)
   const filteredHiringProfiles = useMemo(() => {
@@ -1399,6 +1604,27 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
           const search = manualLocation.toLowerCase();
           result = result.filter(p => p.location?.toLowerCase().includes(search));
       }
+      
+      // Filter out tradies who are unavailable at the current time
+      const currentDateKey = formatDateKey(new Date());
+      const currentTimeSlot = getCurrentTimeSlot();
+      
+      // Filter out unavailable tradies (use 'morning' as default for off-hours)
+      const effectiveTimeSlot = currentTimeSlot || 'morning';
+      result = result.filter(p => {
+          const workCalendar = p.workCalendar || {};
+          const dateSlots = workCalendar[currentDateKey];
+          
+          if (!dateSlots) return true; // Available if no slots defined for today
+          
+          // Support both old format (array) and new format (object)
+          if (Array.isArray(dateSlots)) {
+              return !dateSlots.includes(effectiveTimeSlot);
+          } else {
+              return !dateSlots[effectiveTimeSlot];
+          }
+      });
+      
       // Sort: Verified first for hiring, then distance
       result.sort((a, b) => {
           if (a.verified !== b.verified) return b.verified ? 1 : -1;
@@ -2151,6 +2377,33 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                 updateData['serviceLocation.address'] = '';
                 updateData['serviceLocation.phone'] = '';
                 updateData['serviceLocation.email'] = '';
+                
+                // Move payment from "On Hold" to "Available" for tradie
+                const jobDoc = await getDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId));
+                if (jobDoc.exists()) {
+                    const jobData = jobDoc.data();
+                    if (jobData.tradieUid && jobData.tradieAmount) {
+                        const tradieAmount = jobData.tradieAmount;
+                        
+                        // Update tradie's balance
+                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', jobData.tradieUid), {
+                            'finances.onHoldBalance': increment(-tradieAmount),
+                            'finances.availableBalance': increment(tradieAmount)
+                        });
+                        
+                        // Update transaction status
+                        const q = query(
+                            collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+                            where('jobId', '==', jobId),
+                            where('type', '==', 'payment')
+                        );
+                        const txSnapshot = await getDocs(q);
+                        const updatePromises = txSnapshot.docs.map(txDoc => 
+                            updateDoc(txDoc.ref, { status: 'completed' })
+                        );
+                        await Promise.all(updatePromises);
+                    }
+                }
             }
             
             await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId), updateData);
@@ -2372,10 +2625,43 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
 
     const handleConfirmBooking = async (jobId) => {
         try {
+            const job = jobs.find(j => j.id === jobId);
             await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobId), {
                 status: 'BookingConfirmed',
                 bookingConfirmedAt: serverTimestamp()
             });
+            
+            // Update tradie's work calendar to mark the booked time as unavailable
+            if (job?.tradieUid && job?.booking?.date && job?.booking?.timeSlot) {
+                const tradieRef = doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', job.tradieUid);
+                const tradieDoc = await getDoc(tradieRef);
+                const tradieData = tradieDoc.data();
+                const workCalendar = tradieData?.workCalendar || {};
+                
+                // Support both old format (array) and new format (object)
+                const dateSlots = workCalendar[job.booking.date];
+                let updatedDateSlots;
+                
+                if (Array.isArray(dateSlots)) {
+                    // Old format - convert to new format
+                    updatedDateSlots = {};
+                    dateSlots.forEach(slot => {
+                        updatedDateSlots[slot] = { reason: 'manual' };
+                    });
+                } else {
+                    updatedDateSlots = dateSlots || {};
+                }
+                
+                // Add the booked time slot
+                updatedDateSlots[job.booking.timeSlot] = { 
+                    reason: 'job', 
+                    jobId: jobId 
+                };
+                
+                await updateDoc(tradieRef, {
+                    [`workCalendar.${job.booking.date}`]: updatedDateSlots
+                });
+            }
         } catch (error) {
             console.error("Error confirming booking:", error);
         }
@@ -2385,24 +2671,60 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
         if (!jobForPayment) return;
         setProcessingPayment(true);
         
-        // Simulate payment processing (replace with real Stripe integration)
+        // Simulate payment processing
         setTimeout(async () => {
             try {
+                const paymentAmount = jobForPayment.quote?.total || 0;
+                const commission = paymentAmount * 0.15; // 15% commission
+                const tradieAmount = paymentAmount - commission;
+                
+                // Update job status
                 await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobForPayment.id), {
                     status: 'PaymentComplete',
                     paymentCompletedAt: serverTimestamp(),
-                    paymentAmount: jobForPayment.quote?.total || 0
+                    paymentAmount: paymentAmount,
+                    commission: commission,
+                    tradieAmount: tradieAmount
                 });
+                
+                // Add payment to tradie's "On Hold" balance
+                if (jobForPayment.tradieUid) {
+                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', jobForPayment.tradieUid), {
+                        'finances.onHoldBalance': increment(tradieAmount),
+                        'finances.totalEarnings': increment(tradieAmount),
+                        'finances.totalCommissionPaid': increment(commission)
+                    });
+                    
+                    // Create transaction record
+                    await addDoc(collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'), {
+                        tradieUid: jobForPayment.tradieUid,
+                        jobId: jobForPayment.id,
+                        jobTitle: jobForPayment.title || 'Job',
+                        type: 'payment',
+                        amount: tradieAmount,
+                        commission: commission,
+                        status: 'onHold',
+                        createdAt: serverTimestamp()
+                    });
+                }
+                
                 setProcessingPayment(false);
                 setShowPaymentModal(false);
+                
+                // Store jobId before clearing state
+                const completedJobId = jobForPayment.id;
                 setJobForPayment(null);
                 
                 // Automatically move to InProgress after payment
                 setTimeout(async () => {
-                    await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', jobForPayment.id), {
-                        status: 'InProgress',
-                        startedAt: serverTimestamp()
-                    });
+                    try {
+                        await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'jobs', completedJobId), {
+                            status: 'InProgress',
+                            startedAt: serverTimestamp()
+                        });
+                    } catch (error) {
+                        console.error("Error moving job to InProgress:", error);
+                    }
                 }, 1000);
             } catch (error) {
                 console.error("Error processing payment:", error);
@@ -3312,8 +3634,8 @@ const JobManager = ({ user, userProfile, onPendingCountChange }) => {
                                 className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:outline-none text-sm">
                                 <option value="">Select a time slot</option>
                                 <option value="Morning (8AM-12PM)">Morning (8AM-12PM)</option>
-                                <option value="Afternoon (12PM-5PM)">Afternoon (12PM-5PM)</option>
-                                <option value="Evening (5PM-8PM)">Evening (5PM-8PM)</option>
+                                <option value="Afternoon (12PM-8PM)">Afternoon (12PM-8PM)</option>
+                                <option value="Evening (8PM-11PM)">Evening (8PM-11PM)</option>
                             </select>
                         </div>
                         
@@ -3758,6 +4080,20 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
 
                 <div className={`relative mb-3 group -mt-16`}>
                     <Avatar profile={isEditing ? editData : profile} size="xl" className="shadow-lg border-4 border-white w-24 h-24" showEditIcon={!isEditing} />
+                    
+                    {/* Busy/DND Badge */}
+                    {profile.role === 'tradie' && !isEditing && (() => {
+                        const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
+                        if (currentlyUnavailable) {
+                            return (
+                                <div className="absolute -bottom-1 -right-1 bg-red-500 text-white p-1.5 rounded-full shadow-lg border-2 border-white" title="Currently Unavailable">
+                                    <Ban size={14} />
+                                </div>
+                            );
+                        }
+                        return null;
+                    })()}
+                    
                     {isEditing && (
                         <button onClick={() => photoInputRef.current?.click()} className="absolute bottom-0 right-0 bg-orange-500 text-white p-2 rounded-full shadow-md hover:bg-orange-600 transition-colors border-2 border-white"><Camera size={16} /></button>
                     )}
@@ -3787,6 +4123,40 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
                         <p className="text-slate-500 text-sm capitalize font-medium">{profile.role} • {profile.location}</p>
                         {profile.role === 'tradie' && <p className="font-mono text-slate-800 font-bold mt-1">£{profile.rate}/hr</p>}
                         <p className="text-center text-slate-600 mt-3 text-sm max-w-xs leading-relaxed">{profile.bio}</p>
+                        
+                        {/* Not Available Banner for Tradies */}
+                        {profile.role === 'tradie' && (() => {
+                            const currentlyUnavailable = isCurrentlyUnavailable(profile.workCalendar);
+                            if (currentlyUnavailable) {
+                                const unavailabilityInfo = getCurrentUnavailabilityInfo(profile.workCalendar);
+                                const nextAvailable = getNextAvailableDateTime(profile.workCalendar);
+                                const isOnJob = unavailabilityInfo?.reason === 'job';
+                                
+                                if (nextAvailable) {
+                                    return (
+                                        <div className={`mt-4 w-full border-2 rounded-xl p-3 ${isOnJob ? 'bg-blue-50 border-blue-200' : 'bg-red-50 border-red-200'}`}>
+                                            <div className="flex items-center gap-2 justify-center">
+                                                <Ban size={16} className={isOnJob ? 'text-blue-600' : 'text-red-600'} />
+                                                <div className="text-center">
+                                                    <p className={`text-xs font-bold ${isOnJob ? 'text-blue-900' : 'text-red-900'}`}>
+                                                        {isOnJob ? "On a job! I'll be available for Hire from:" : "Not Available for Hire until:"}
+                                                    </p>
+                                                    <p className={`text-sm font-black ${isOnJob ? 'text-blue-700' : 'text-red-700'}`}>
+                                                        {nextAvailable.date.toLocaleDateString('en-GB', { 
+                                                            weekday: 'short',
+                                                            month: 'short', 
+                                                            day: 'numeric',
+                                                            year: 'numeric'
+                                                        })} at {formatTimeSlot(nextAvailable.timeSlot)}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                }
+                            }
+                            return null;
+                        })()}
                     </>
                 )}
                 
@@ -3810,7 +4180,12 @@ const UserProfile = ({ user, profile, onLogout, showToast, onEnableLocation, onN
             </div>
             <div className="space-y-2 mb-8">
                 <ProfileLink icon={Settings} label="Settings" onClick={() => onNavigate('settings')} />
-                <ProfileLink icon={DollarSign} label="Payments & Credits" onClick={() => {}} />
+                {profile.role === 'tradie' && (
+                    <ProfileLink icon={Calendar} label="Work Calendar" onClick={() => onNavigate('workCalendar')} />
+                )}
+                {profile.role === 'tradie' && (
+                    <ProfileLink icon={DollarSign} label="Payments & Credits" onClick={() => onNavigate('paymentsCredits')} />
+                )}
                 <ProfileLink icon={ShieldCheck} label="Safety Centre" onClick={() => onNavigate('safety')} />
                 <button onClick={onLogout} className="w-full p-4 flex items-center gap-3 text-red-500 hover:bg-red-50 rounded-xl transition-colors font-bold"><LogOut size={20} /> <span className="font-medium">Sign Out</span></button>
             </div>
@@ -3929,19 +4304,27 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
         setActiveSessions(prev => prev.filter(s => s.id !== sessionId));
     };
 
-    const ToggleSwitch = ({ label, description, value, onChange, icon: Icon }) => (
-        <div className="flex items-start justify-between py-3 border-b border-slate-100 last:border-0">
+    const ToggleSwitch = ({ label, description, value, onChange, icon: Icon, disabled = false, badge = null }) => (
+        <div className={`flex items-start justify-between py-3 border-b border-slate-100 last:border-0 ${disabled ? 'opacity-50' : ''}`}>
             <div className="flex-1 pr-4">
                 <div className="flex items-center gap-2 mb-1">
                     {Icon && <Icon size={16} className="text-slate-500" />}
                     <h4 className="font-bold text-sm text-slate-800">{label}</h4>
+                    {badge && (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                            badge === 'Android' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'
+                        }`}>
+                            {badge === 'Android' ? 'Only on Android App' : 'Coming Soon'}
+                        </span>
+                    )}
                 </div>
                 {description && <p className="text-xs text-slate-500 leading-relaxed">{description}</p>}
             </div>
             <button
-                onClick={() => onChange(!value)}
+                onClick={() => !disabled && onChange(!value)}
+                disabled={disabled}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    value ? 'bg-orange-500' : 'bg-slate-300'
+                    disabled ? 'bg-slate-200 cursor-not-allowed' : value ? 'bg-orange-500' : 'bg-slate-300'
                 }`}
             >
                 <span
@@ -3975,6 +4358,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.useManualLocation}
                         onChange={(val) => setSettings({ ...settings, useManualLocation: val })}
                         icon={Navigation}
+                        disabled={true}
+                        badge="Soon"
                     />
                     {settings.useManualLocation && (
                         <div className="mt-3">
@@ -3983,6 +4368,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                                 placeholder="e.g., Central London"
                                 value={settings.manualLocation}
                                 onChange={(e) => setSettings({ ...settings, manualLocation: e.target.value })}
+                                disabled={true}
                             />
                         </div>
                     )}
@@ -3999,6 +4385,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyMessages}
                         onChange={(val) => setSettings({ ...settings, notifyMessages: val })}
                         icon={MessageCircle}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Job Offer Notifications"
@@ -4006,6 +4394,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyJobOffers}
                         onChange={(val) => setSettings({ ...settings, notifyJobOffers: val })}
                         icon={Briefcase}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Match Notifications"
@@ -4013,6 +4403,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyMatches}
                         onChange={(val) => setSettings({ ...settings, notifyMatches: val })}
                         icon={Heart}
+                        disabled={true}
+                        badge="Android"
                     />
                 </div>
 
@@ -4044,7 +4436,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                     />
                     <ToggleSwitch
                         label="Photo Blur"
-                        description="Blur your photos unless you've matched"
+                        description="Blurs your profile picture and in Social"
                         value={settings.blurPhotos}
                         onChange={(val) => setSettings({ ...settings, blurPhotos: val })}
                         icon={Eye}
@@ -4055,6 +4447,13 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.hideOnlineStatus}
                         onChange={(val) => setSettings({ ...settings, hideOnlineStatus: val })}
                         icon={Clock}
+                    />
+                    <ToggleSwitch
+                        label="Job-Only Visibility"
+                        description="Appear in Hire tab only, not Social feed"
+                        value={settings.jobOnlyVisibility}
+                        onChange={(val) => setSettings({ ...settings, jobOnlyVisibility: val })}
+                        icon={Briefcase}
                     />
                     
                     {/* Login History */}
@@ -4101,11 +4500,14 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                     </h3>
                     
                     {/* Auto-delete chats */}
-                    <div className="py-3 border-b border-slate-100">
+                    <div className="py-3 border-b border-slate-100 opacity-50">
                         <label className="block mb-2">
                             <div className="flex items-center gap-2 mb-1">
                                 <Trash2 size={16} className="text-slate-500" />
                                 <span className="font-bold text-sm text-slate-800">Auto-delete Chats</span>
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">
+                                    Only on Android App
+                                </span>
                             </div>
                             <p className="text-xs text-slate-500 mb-2">Automatically delete messages after</p>
                         </label>
@@ -4113,6 +4515,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                             value={settings.autoDeleteChats}
                             onChange={(e) => setSettings({ ...settings, autoDeleteChats: e.target.value })}
                             className="w-full p-2 border border-slate-200 rounded-lg text-sm"
+                            disabled={true}
                         >
                             <option value="never">Never</option>
                             <option value="24h">24 hours</option>
@@ -4127,6 +4530,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.screenshotDetection}
                         onChange={(val) => setSettings({ ...settings, screenshotDetection: val })}
                         icon={Camera}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Verified-Only Chats"
@@ -4134,13 +4539,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.verifiedOnlyChats}
                         onChange={(val) => setSettings({ ...settings, verifiedOnlyChats: val })}
                         icon={UserCheck}
-                    />
-                    <ToggleSwitch
-                        label="Job-Only Visibility"
-                        description="Appear in Hire tab only, not Social feed"
-                        value={settings.jobOnlyVisibility}
-                        onChange={(val) => setSettings({ ...settings, jobOnlyVisibility: val })}
-                        icon={Briefcase}
+                        disabled={true}
+                        badge="Soon"
                     />
                 </div>
 
@@ -4171,19 +4571,109 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                             }
                             
                             try {
-                                // Soft-delete: anonymize profile data
-                                // NOTE: This anonymizes the main profile. Additional cleanup for messages,
-                                // jobs, and reviews can be added here or handled by backend cleanup jobs.
-                                // Current approach preserves data integrity for historical job references.
-                                await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
-                                    name: '[Deleted User]',
-                                    bio: '[Account Deleted]',
-                                    email: '[Deleted]',
-                                    primaryPhoto: null,
-                                    coverPhoto: null,
-                                    deleted: true,
-                                    deletedAt: serverTimestamp()
-                                });
+                                showToast('Deleting account...', 'info');
+                                
+                                // Helper function to delete documents in batches (Firestore limit is 500 per batch)
+                                const deleteInBatches = async (docsToDelete) => {
+                                    const batchSize = 500;
+                                    for (let i = 0; i < docsToDelete.length; i += batchSize) {
+                                        const batch = writeBatch(db);
+                                        const batchDocs = docsToDelete.slice(i, i + batchSize);
+                                        batchDocs.forEach(docRef => batch.delete(docRef));
+                                        await batch.commit();
+                                    }
+                                };
+                                
+                                try {
+                                    // Delete all chats where user is a participant
+                                    const chatsQuery = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'chats'),
+                                        where('participants', 'array-contains', user.uid)
+                                    );
+                                    const chatsSnapshot = await getDocs(chatsQuery);
+                                    const docsToDelete = [];
+                                    
+                                    for (const chatDoc of chatsSnapshot.docs) {
+                                        // Collect all messages in the chat
+                                        const messagesQuery = collection(db, 'artifacts', getAppId(), 'public', 'data', 'chats', chatDoc.id, 'messages');
+                                        const messagesSnapshot = await getDocs(messagesQuery);
+                                        messagesSnapshot.docs.forEach(msgDoc => docsToDelete.push(msgDoc.ref));
+                                        // Add chat document itself
+                                        docsToDelete.push(chatDoc.ref);
+                                    }
+                                    
+                                    if (docsToDelete.length > 0) {
+                                        await deleteInBatches(docsToDelete);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting chats:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete all jobs associated with user (as client or tradie)
+                                    const jobsQuery1 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'jobs'),
+                                        where('clientId', '==', user.uid)
+                                    );
+                                    const jobsSnapshot1 = await getDocs(jobsQuery1);
+                                    
+                                    const jobsQuery2 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'jobs'),
+                                        where('tradieId', '==', user.uid)
+                                    );
+                                    const jobsSnapshot2 = await getDocs(jobsQuery2);
+                                    
+                                    const jobDocs = [...jobsSnapshot1.docs, ...jobsSnapshot2.docs].map(doc => doc.ref);
+                                    if (jobDocs.length > 0) {
+                                        await deleteInBatches(jobDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting jobs:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete all transactions
+                                    const transactionsQuery = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+                                        where('userId', '==', user.uid)
+                                    );
+                                    const transactionsSnapshot = await getDocs(transactionsQuery);
+                                    const txDocs = transactionsSnapshot.docs.map(doc => doc.ref);
+                                    if (txDocs.length > 0) {
+                                        await deleteInBatches(txDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting transactions:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete blocked users records
+                                    const blockedQuery1 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'blocked_users'),
+                                        where('blockedBy', '==', user.uid)
+                                    );
+                                    const blockedSnapshot1 = await getDocs(blockedQuery1);
+                                    
+                                    const blockedQuery2 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'blocked_users'),
+                                        where('blockedUser', '==', user.uid)
+                                    );
+                                    const blockedSnapshot2 = await getDocs(blockedQuery2);
+                                    
+                                    const blockedDocs = [...blockedSnapshot1.docs, ...blockedSnapshot2.docs].map(doc => doc.ref);
+                                    if (blockedDocs.length > 0) {
+                                        await deleteInBatches(blockedDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting blocked users:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                // Delete profile document
+                                await deleteDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid));
                                 
                                 // Delete Firebase Auth account
                                 await deleteUser(user);
@@ -4297,6 +4787,299 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                                         </div>
                                     </div>
                                 ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// --- PAYMENTS & CREDITS ---
+const PaymentsCredits = ({ user, profile, onBack, showToast }) => {
+    const [transactions, setTransactions] = useState([]);
+    const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+    const [withdrawMethod, setWithdrawMethod] = useState('bank'); // 'bank' or 'crypto'
+    const [withdrawAmount, setWithdrawAmount] = useState('');
+    
+    // Financial stats
+    const onHoldBalance = profile?.finances?.onHoldBalance || 0;
+    const availableBalance = profile?.finances?.availableBalance || 0;
+    const totalEarnings = profile?.finances?.totalEarnings || 0;
+    const totalCommissionPaid = profile?.finances?.totalCommissionPaid || 0;
+    
+    // Load transactions
+    useEffect(() => {
+        if (!user) return;
+        
+        const q = query(
+            collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+            where('tradieUid', '==', user.uid),
+            orderBy('createdAt', 'desc'),
+            limit(50)
+        );
+        
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const txs = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setTransactions(txs);
+        });
+        
+        return () => unsubscribe();
+    }, [user]);
+    
+    const handleWithdraw = async () => {
+        if (!withdrawAmount || parseFloat(withdrawAmount) <= 0) {
+            showToast("Please enter a valid amount", "error");
+            return;
+        }
+        
+        const amount = parseFloat(withdrawAmount);
+        if (amount > availableBalance) {
+            showToast("Insufficient available balance", "error");
+            return;
+        }
+        
+        try {
+            // Create withdrawal transaction
+            await addDoc(collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'), {
+                tradieUid: user.uid,
+                type: 'withdrawal',
+                amount: -amount,
+                method: withdrawMethod,
+                status: 'pending',
+                createdAt: serverTimestamp()
+            });
+            
+            // Update user's available balance
+            await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
+                'finances.availableBalance': increment(-amount)
+            });
+            
+            showToast(`Withdrawal of £${amount.toFixed(2)} initiated via ${withdrawMethod === 'bank' ? 'Bank Transfer' : 'Crypto Wallet'}`, "success");
+            setShowWithdrawModal(false);
+            setWithdrawAmount('');
+        } catch (error) {
+            console.error("Error processing withdrawal:", error);
+            showToast("Failed to process withdrawal", "error");
+        }
+    };
+    
+    return (
+        <div className="min-h-screen bg-slate-50">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-orange-500 to-orange-600 text-white p-4 sticky top-0 z-10 shadow-md">
+                <div className="flex items-center gap-3">
+                    <button onClick={onBack} className="p-2 hover:bg-white/20 rounded-lg transition-colors">
+                        <ChevronLeft size={24} />
+                    </button>
+                    <div className="flex items-center gap-2">
+                        <DollarSign size={24} />
+                        <h1 className="text-xl font-bold">Payments & Credits</h1>
+                    </div>
+                </div>
+            </div>
+
+            <div className="p-4 space-y-4">
+                {/* Balance Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                    {/* On Hold */}
+                    <div className="bg-gradient-to-br from-amber-500 to-amber-600 rounded-xl p-4 text-white shadow-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Clock size={18} />
+                            <p className="text-xs font-medium opacity-90">On Hold</p>
+                        </div>
+                        <p className="text-2xl font-bold">£{onHoldBalance.toFixed(2)}</p>
+                        <p className="text-xs opacity-75 mt-1">Pending completion</p>
+                    </div>
+                    
+                    {/* Available */}
+                    <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-4 text-white shadow-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                            <CheckCircle size={18} />
+                            <p className="text-xs font-medium opacity-90">Available</p>
+                        </div>
+                        <p className="text-2xl font-bold">£{availableBalance.toFixed(2)}</p>
+                        <p className="text-xs opacity-75 mt-1">Ready to withdraw</p>
+                    </div>
+                </div>
+
+                {/* Stats Cards */}
+                <div className="grid grid-cols-2 gap-3">
+                    {/* Total Earnings */}
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Earnings</p>
+                        <p className="text-xl font-bold text-slate-900">£{totalEarnings.toFixed(2)}</p>
+                    </div>
+                    
+                    {/* Commission Paid */}
+                    <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100">
+                        <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Commission (15%)</p>
+                        <p className="text-xl font-bold text-slate-900">£{totalCommissionPaid.toFixed(2)}</p>
+                    </div>
+                </div>
+
+                {/* Withdraw Button */}
+                <button
+                    onClick={() => setShowWithdrawModal(true)}
+                    disabled={availableBalance <= 0}
+                    className={`w-full py-4 rounded-xl font-bold text-white shadow-lg transition-all ${
+                        availableBalance > 0
+                            ? 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 active:scale-95'
+                            : 'bg-slate-300 cursor-not-allowed'
+                    }`}
+                >
+                    <div className="flex items-center justify-center gap-2">
+                        <DollarSign size={20} />
+                        <span>Withdraw Funds</span>
+                    </div>
+                </button>
+
+                {/* Transactions History */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100">
+                    <div className="p-4 border-b border-slate-100">
+                        <h2 className="font-bold text-slate-900">Transaction History</h2>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                        {transactions.length === 0 ? (
+                            <div className="p-8 text-center text-slate-400">
+                                <DollarSign size={48} className="mx-auto mb-2 opacity-50" />
+                                <p className="text-sm">No transactions yet</p>
+                            </div>
+                        ) : (
+                            transactions.map(tx => (
+                                <div key={tx.id} className="p-4 flex items-center justify-between">
+                                    <div className="flex-1">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <p className="text-sm font-bold text-slate-900 capitalize">{tx.type}</p>
+                                            {tx.status === 'pending' && (
+                                                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Pending</span>
+                                            )}
+                                            {tx.status === 'completed' && (
+                                                <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Completed</span>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-slate-500">
+                                            {tx.jobTitle || (tx.method ? `Via ${tx.method === 'bank' ? 'Bank' : 'Crypto'}` : 'Payment')}
+                                        </p>
+                                        {tx.createdAt?.seconds && (
+                                            <p className="text-xs text-slate-400 mt-1">
+                                                {new Date(tx.createdAt.seconds * 1000).toLocaleDateString()}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <div className="text-right">
+                                        <p className={`text-lg font-bold ${tx.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                            {tx.amount >= 0 ? '+' : ''}£{Math.abs(tx.amount).toFixed(2)}
+                                        </p>
+                                        {tx.commission && (
+                                            <p className="text-xs text-slate-500">-£{tx.commission.toFixed(2)} fee</p>
+                                        )}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+
+            {/* Withdraw Modal */}
+            {showWithdrawModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full max-h-[90vh] overflow-y-auto">
+                        <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                            <h2 className="text-xl font-bold text-slate-900">Withdraw Funds</h2>
+                            <button onClick={() => setShowWithdrawModal(false)} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+                                <X size={20} />
+                            </button>
+                        </div>
+                        
+                        <div className="p-6 space-y-4">
+                            {/* Available Balance */}
+                            <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+                                <p className="text-xs font-bold text-green-700 uppercase tracking-wider mb-1">Available Balance</p>
+                                <p className="text-2xl font-bold text-green-900">£{availableBalance.toFixed(2)}</p>
+                            </div>
+
+                            {/* Withdrawal Method */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">Withdrawal Method</label>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <button
+                                        onClick={() => setWithdrawMethod('bank')}
+                                        className={`p-3 rounded-lg border-2 transition-all ${
+                                            withdrawMethod === 'bank'
+                                                ? 'border-orange-500 bg-orange-50'
+                                                : 'border-slate-200 bg-white'
+                                        }`}
+                                    >
+                                        <p className="text-sm font-bold">Bank Account</p>
+                                        <p className="text-xs text-slate-500">1-3 days</p>
+                                    </button>
+                                    <button
+                                        onClick={() => setWithdrawMethod('crypto')}
+                                        className={`p-3 rounded-lg border-2 transition-all ${
+                                            withdrawMethod === 'crypto'
+                                                ? 'border-orange-500 bg-orange-50'
+                                                : 'border-slate-200 bg-white'
+                                        }`}
+                                    >
+                                        <p className="text-sm font-bold">Crypto Wallet</p>
+                                        <p className="text-xs text-slate-500">Instant</p>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Amount */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-700 mb-2">Amount (£)</label>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    max={availableBalance}
+                                    value={withdrawAmount}
+                                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                                    placeholder="0.00"
+                                    className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:outline-none text-lg font-bold"
+                                />
+                                <button
+                                    onClick={() => setWithdrawAmount(availableBalance.toString())}
+                                    className="mt-2 text-xs text-orange-600 font-bold hover:text-orange-700"
+                                >
+                                    Withdraw All
+                                </button>
+                            </div>
+
+                            {/* Info */}
+                            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                                <div className="flex items-start gap-2">
+                                    <Info size={16} className="text-blue-600 flex-shrink-0 mt-0.5" />
+                                    <p className="text-xs text-blue-800">
+                                        {withdrawMethod === 'bank'
+                                            ? 'Bank transfers typically arrive within 1-3 business days.'
+                                            : 'Crypto withdrawals are processed instantly to your wallet address.'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {/* Buttons */}
+                            <div className="flex gap-2 pt-2">
+                                <button
+                                    onClick={() => setShowWithdrawModal(false)}
+                                    className="flex-1 py-3 px-4 rounded-lg border-2 border-slate-200 font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleWithdraw}
+                                    className="flex-1 py-3 px-4 rounded-lg bg-gradient-to-r from-green-500 to-green-600 text-white font-bold hover:from-green-600 hover:to-green-700 transition-all shadow-lg"
+                                >
+                                    Confirm Withdrawal
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -4693,6 +5476,694 @@ const SafetyCentre = ({ user, onBack, showToast }) => {
                     </div>
                 </div>
             )}
+        </div>
+    );
+};
+
+// --- WORK CALENDAR COMPONENT ---
+const WorkCalendar = ({ user, profile, onBack, showToast }) => {
+    const [currentDate, setCurrentDate] = useState(new Date());
+    const [unavailability, setUnavailability] = useState({});
+    const [selectedDate, setSelectedDate] = useState(null);
+
+    // Helper to get profile document reference
+    const getProfileDocRef = () => doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid);
+
+    // Load unavailability data from Firebase
+    useEffect(() => {
+        if (!user || !db) return;
+        const unsub = onSnapshot(
+            getProfileDocRef(),
+            (docSnap) => {
+                if (docSnap.exists()) {
+                    setUnavailability(docSnap.data().workCalendar || {});
+                } else {
+                    setUnavailability({});
+                }
+            }
+        );
+        return () => unsub();
+    }, [user]);
+
+    // Calendar helper functions
+    const getDaysInMonth = (date) => {
+        const year = date.getFullYear();
+        const month = date.getMonth();
+        const firstDay = new Date(year, month, 1);
+        const lastDay = new Date(year, month + 1, 0);
+        const daysInMonth = lastDay.getDate();
+        const startingDayOfWeek = firstDay.getDay();
+        
+        return { daysInMonth, startingDayOfWeek, year, month };
+    };
+
+    const navigateMonth = (direction) => {
+        const newDate = new Date(currentDate);
+        newDate.setMonth(currentDate.getMonth() + direction);
+        setCurrentDate(newDate);
+    };
+
+    const toggleTimeSlot = async (dateKey, timeSlot) => {
+        const newUnavailability = { ...unavailability };
+        
+        // Initialize date if it doesn't exist (use object format for new entries)
+        if (!newUnavailability[dateKey]) {
+            newUnavailability[dateKey] = {};
+        }
+        
+        // Convert old array format to new object format if needed
+        if (Array.isArray(newUnavailability[dateKey])) {
+            const oldSlots = newUnavailability[dateKey];
+            newUnavailability[dateKey] = {};
+            oldSlots.forEach(slot => {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            });
+        }
+        
+        const dateSlots = newUnavailability[dateKey];
+        
+        // Toggle the slot (only allow toggling manual slots, not job slots)
+        if (dateSlots[timeSlot]) {
+            // Only allow removing manual unavailability, not job-based
+            if (dateSlots[timeSlot].reason === 'manual') {
+                delete dateSlots[timeSlot];
+            } else {
+                showToast("Cannot remove job-booked time slots", "error");
+                return;
+            }
+        } else {
+            dateSlots[timeSlot] = { reason: 'manual' };
+        }
+        
+        // Clean up empty date entries
+        if (Object.keys(dateSlots).length === 0) {
+            delete newUnavailability[dateKey];
+        }
+        
+        try {
+            // If workCalendar is now empty, remove the field entirely from Firebase
+            if (Object.keys(newUnavailability).length === 0) {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: deleteField()
+                });
+            } else {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: newUnavailability
+                });
+            }
+            setUnavailability(newUnavailability);
+            showToast("Availability updated", "success");
+        } catch (error) {
+            console.error("Error updating availability:", error);
+            showToast("Failed to update availability", "error");
+        }
+    };
+
+    const blockEntireDay = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        
+        // Convert to object format if needed
+        if (Array.isArray(newUnavailability[dateKey])) {
+            const oldSlots = newUnavailability[dateKey];
+            newUnavailability[dateKey] = {};
+            oldSlots.forEach(slot => {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            });
+        } else if (!newUnavailability[dateKey]) {
+            newUnavailability[dateKey] = {};
+        }
+        
+        // Block all time slots (preserve job slots)
+        ['morning', 'afternoon', 'evening'].forEach(slot => {
+            if (!newUnavailability[dateKey][slot] || newUnavailability[dateKey][slot].reason !== 'job') {
+                newUnavailability[dateKey][slot] = { reason: 'manual' };
+            }
+        });
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire day blocked", "success");
+        } catch (error) {
+            console.error("Error blocking day:", error);
+            showToast("Failed to block day", "error");
+        }
+    };
+
+    const blockEntireWeek = async (startDateKey) => {
+        const newUnavailability = { ...unavailability };
+        const startDate = new Date(startDateKey + 'T00:00:00');
+        
+        // Block 7 days starting from the selected date
+        for (let i = 0; i < 7; i++) {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + i);
+            const dateKey = formatDateKey(date);
+            
+            // Convert to object format if needed
+            if (Array.isArray(newUnavailability[dateKey])) {
+                const oldSlots = newUnavailability[dateKey];
+                newUnavailability[dateKey] = {};
+                oldSlots.forEach(slot => {
+                    newUnavailability[dateKey][slot] = { reason: 'manual' };
+                });
+            } else if (!newUnavailability[dateKey]) {
+                newUnavailability[dateKey] = {};
+            }
+            
+            // Block all time slots (preserve job slots)
+            ['morning', 'afternoon', 'evening'].forEach(slot => {
+                if (!newUnavailability[dateKey][slot] || newUnavailability[dateKey][slot].reason !== 'job') {
+                    newUnavailability[dateKey][slot] = { reason: 'manual' };
+                }
+            });
+        }
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire week blocked", "success");
+        } catch (error) {
+            console.error("Error blocking week:", error);
+            showToast("Failed to block week", "error");
+        }
+    };
+
+    const blockEntireMonth = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        const [yearStr, monthStr] = dateKey.split('-');
+        const year = parseInt(yearStr, 10);
+        const month = parseInt(monthStr, 10) - 1;
+        
+        // Get the number of days in the month
+        const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+        
+        // Block all days in the month
+        for (let day = 1; day <= lastDayOfMonth; day++) {
+            const date = new Date(year, month, day);
+            const key = formatDateKey(date);
+            
+            // Convert to object format if needed
+            if (Array.isArray(newUnavailability[key])) {
+                const oldSlots = newUnavailability[key];
+                newUnavailability[key] = {};
+                oldSlots.forEach(slot => {
+                    newUnavailability[key][slot] = { reason: 'manual' };
+                });
+            } else if (!newUnavailability[key]) {
+                newUnavailability[key] = {};
+            }
+            
+            // Block all time slots (preserve job slots)
+            ['morning', 'afternoon', 'evening'].forEach(slot => {
+                if (!newUnavailability[key][slot] || newUnavailability[key][slot].reason !== 'job') {
+                    newUnavailability[key][slot] = { reason: 'manual' };
+                }
+            });
+        }
+        
+        try {
+            await updateDoc(getProfileDocRef(), {
+                workCalendar: newUnavailability
+            });
+            setUnavailability(newUnavailability);
+            showToast("Entire month blocked", "success");
+        } catch (error) {
+            console.error("Error blocking month:", error);
+            showToast("Failed to block month", "error");
+        }
+    };
+
+    // Helper function to update work calendar and handle empty state
+    const updateWorkCalendar = async (newUnavailability, successMessage) => {
+        try {
+            if (Object.keys(newUnavailability).length === 0) {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: deleteField()
+                });
+            } else {
+                await updateDoc(getProfileDocRef(), {
+                    workCalendar: newUnavailability
+                });
+            }
+            setUnavailability(newUnavailability);
+            showToast(successMessage, "success");
+        } catch (error) {
+            console.error("Error updating work calendar:", error);
+            showToast("Failed to update calendar", "error");
+        }
+    };
+
+    const clearEntireDay = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        const dateSlots = newUnavailability[dateKey];
+        
+        if (!dateSlots) {
+            showToast("No unavailability to clear", "error");
+            return;
+        }
+        
+        // If it's old array format, just delete it (no job protection needed for old data)
+        if (Array.isArray(dateSlots)) {
+            delete newUnavailability[dateKey];
+            await updateWorkCalendar(newUnavailability, "Day cleared");
+            return;
+        }
+        
+        // New object format - only remove manual slots, keep job slots
+        const jobSlots = {};
+        Object.keys(dateSlots).forEach(slot => {
+            if (dateSlots[slot]?.reason === 'job') {
+                jobSlots[slot] = dateSlots[slot];
+            }
+        });
+        
+        if (Object.keys(jobSlots).length > 0) {
+            newUnavailability[dateKey] = jobSlots;
+            await updateWorkCalendar(newUnavailability, "Day cleared (job-booked slots preserved)");
+        } else {
+            delete newUnavailability[dateKey];
+            await updateWorkCalendar(newUnavailability, "Day cleared");
+        }
+    };
+
+    const clearEntireWeek = async (startDateKey) => {
+        const newUnavailability = { ...unavailability };
+        const [year, month, day] = startDateKey.split('-').map(Number);
+        const startDate = new Date(year, month - 1, day);
+        
+        let hasJobSlots = false;
+        
+        // Clear 7 days starting from the selected date
+        for (let i = 0; i < 7; i++) {
+            const date = new Date(startDate);
+            date.setDate(startDate.getDate() + i);
+            const dateKey = formatDateKey(date);
+            const dateSlots = newUnavailability[dateKey];
+            
+            if (!dateSlots) continue;
+            
+            // If it's old array format, just delete it
+            if (Array.isArray(dateSlots)) {
+                delete newUnavailability[dateKey];
+            } else {
+                // New object format - only remove manual slots, keep job slots
+                const jobSlots = {};
+                Object.keys(dateSlots).forEach(slot => {
+                    if (dateSlots[slot]?.reason === 'job') {
+                        jobSlots[slot] = dateSlots[slot];
+                        hasJobSlots = true;
+                    }
+                });
+                
+                if (Object.keys(jobSlots).length > 0) {
+                    newUnavailability[dateKey] = jobSlots;
+                } else {
+                    delete newUnavailability[dateKey];
+                }
+            }
+        }
+        
+        const message = hasJobSlots ? "Week cleared (job-booked slots preserved)" : "Week cleared";
+        await updateWorkCalendar(newUnavailability, message);
+    };
+
+    const clearEntireMonth = async (dateKey) => {
+        const newUnavailability = { ...unavailability };
+        const [year, month] = dateKey.split('-').map(Number);
+        
+        // Get the number of days in the month
+        const lastDayOfMonth = new Date(year, month, 0).getDate();
+        
+        let hasJobSlots = false;
+        
+        // Clear all days in the month
+        for (let day = 1; day <= lastDayOfMonth; day++) {
+            const date = new Date(year, month - 1, day);
+            const key = formatDateKey(date);
+            const dateSlots = newUnavailability[key];
+            
+            if (!dateSlots) continue;
+            
+            // If it's old array format, just delete it
+            if (Array.isArray(dateSlots)) {
+                delete newUnavailability[key];
+            } else {
+                // New object format - only remove manual slots, keep job slots
+                const jobSlots = {};
+                Object.keys(dateSlots).forEach(slot => {
+                    if (dateSlots[slot]?.reason === 'job') {
+                        jobSlots[slot] = dateSlots[slot];
+                        hasJobSlots = true;
+                    }
+                });
+                
+                if (Object.keys(jobSlots).length > 0) {
+                    newUnavailability[key] = jobSlots;
+                } else {
+                    delete newUnavailability[key];
+                }
+            }
+        }
+        
+        const message = hasJobSlots ? "Month cleared (job-booked slots preserved)" : "Month cleared";
+        await updateWorkCalendar(newUnavailability, message);
+    };
+
+    const { daysInMonth, startingDayOfWeek, year, month } = getDaysInMonth(currentDate);
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    const today = new Date();
+    const todayKey = formatDateKey(today);
+    const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
+    return (
+        <div className="min-h-screen bg-slate-50 pb-20">
+            {/* Header */}
+            <div className="bg-orange-500 text-white sticky top-0 z-40">
+                <div className="p-4 flex items-center gap-3">
+                    <button onClick={onBack}><ArrowRight className="rotate-180" size={20} /></button>
+                    <div className="flex-1">
+                        <h1 className="text-xl font-bold">Work Calendar</h1>
+                        <p className="text-xs opacity-90">Manage your availability</p>
+                    </div>
+                    <Calendar size={24} />
+                </div>
+            </div>
+
+            <div className="p-4">
+                {/* Info Banner */}
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+                    <div className="flex items-start gap-3">
+                        <Info size={20} className="text-blue-600 flex-shrink-0 mt-0.5" />
+                        <div>
+                            <h3 className="font-bold text-sm text-blue-900 mb-1">How it works</h3>
+                            <p className="text-xs text-blue-800 leading-relaxed">
+                                Mark dates and times when you're <strong>not available</strong> for hire. 
+                                Your profile will be hidden from the Hire tab during those times.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* QUICK OPTIONS - Always visible, placed ABOVE calendar */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
+                    <h4 className="font-bold text-xs text-slate-500 uppercase tracking-wider mb-3">Quick Options</h4>
+                    <div className="grid grid-cols-3 gap-2 mb-3">
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireDay(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Day
+                        </Button>
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireWeek(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Week
+                        </Button>
+                        <Button
+                            variant="outline"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? blockEntireMonth(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Block Month
+                        </Button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireDay(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Day
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireWeek(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Week
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            className="text-xs py-2 px-2"
+                            onClick={() => selectedDate ? clearEntireMonth(selectedDate) : showToast("Select a date first", "error")}
+                        >
+                            Clear Month
+                        </Button>
+                    </div>
+                </div>
+
+                {/* Calendar Navigation */}
+                <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 mb-4">
+                    <div className="flex items-center justify-between mb-4">
+                        <button
+                            onClick={() => navigateMonth(-1)}
+                            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                        >
+                            <ChevronLeft size={24} className="text-slate-600" />
+                        </button>
+                        <h2 className="text-lg font-bold text-slate-900">
+                            {monthNames[month]} {year}
+                        </h2>
+                        <button
+                            onClick={() => navigateMonth(1)}
+                            className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+                        >
+                            <ChevronRightIcon size={24} className="text-slate-600" />
+                        </button>
+                    </div>
+
+                    {/* Day names */}
+                    <div className="grid grid-cols-7 gap-1 mb-2">
+                        {dayNames.map(day => (
+                            <div key={day} className="text-center text-xs font-bold text-slate-500 py-1">
+                                {day}
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Calendar grid */}
+                    <div className="grid grid-cols-7 gap-1">
+                        {/* Empty cells for days before month starts */}
+                        {Array.from({ length: startingDayOfWeek }).map((_, i) => (
+                            <div key={`empty-${i}`} className="aspect-square" />
+                        ))}
+                        
+                        {/* Days of the month */}
+                        {Array.from({ length: daysInMonth }).map((_, i) => {
+                            const day = i + 1;
+                            const date = new Date(year, month, day);
+                            const dateKey = formatDateKey(date);
+                            const isPast = date < todayDateOnly;
+                            const isToday = dateKey === todayKey;
+                            const isSelected = selectedDate === dateKey;
+                            
+                            // Check for unavailability (support both array and object formats)
+                            const dateSlots = unavailability[dateKey];
+                            let hasUnavailability = false;
+                            if (dateSlots) {
+                                if (Array.isArray(dateSlots)) {
+                                    hasUnavailability = dateSlots.length > 0;
+                                } else {
+                                    hasUnavailability = Object.keys(dateSlots).length > 0;
+                                }
+                            }
+                            
+                            return (
+                                <button
+                                    key={day}
+                                    onClick={() => !isPast && setSelectedDate(dateKey)}
+                                    disabled={isPast}
+                                    className={`aspect-square rounded-lg flex items-center justify-center text-sm font-bold transition-all ${
+                                        isPast
+                                            ? 'text-slate-300 cursor-not-allowed'
+                                            : isSelected
+                                            ? 'bg-orange-500 text-white shadow-md'
+                                            : isToday
+                                            ? 'bg-blue-100 text-blue-900 border-2 border-blue-500'
+                                            : hasUnavailability
+                                            ? 'bg-red-100 text-red-900 border border-red-300'
+                                            : 'bg-slate-50 text-slate-700 hover:bg-slate-100 border border-slate-200'
+                                    }`}
+                                >
+                                    {day}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    {/* Legend */}
+                    <div className="mt-4 pt-4 border-t border-slate-100 flex flex-wrap gap-3 text-xs">
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-blue-100 border-2 border-blue-500" />
+                            <span className="text-slate-600">Today</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-red-100 border border-red-300" />
+                            <span className="text-slate-600">Unavailable</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 rounded bg-slate-50 border border-slate-200" />
+                            <span className="text-slate-600">Available</span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Time Slot Selection */}
+                {selectedDate && (() => {
+                    // Parse selectedDate string safely (YYYY-MM-DD format)
+                    const [yearStr, monthStr, dayStr] = selectedDate.split('-');
+                    const selectedDateObj = new Date(parseInt(yearStr, 10), parseInt(monthStr, 10) - 1, parseInt(dayStr, 10));
+                    
+                    return (
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 animate-in fade-in slide-in-from-bottom duration-300">
+                        <h3 className="font-bold text-slate-900 mb-3 flex items-center gap-2">
+                            <Clock size={18} className="text-orange-500" />
+                            {selectedDateObj.toLocaleDateString('en-GB', { 
+                                weekday: 'long', 
+                                year: 'numeric', 
+                                month: 'long', 
+                                day: 'numeric' 
+                            })}
+                        </h3>
+                        <p className="text-xs text-slate-500 mb-4">
+                            Select time slots when you are <strong>NOT available</strong>
+                        </p>
+
+                        <div className="space-y-3">
+                            {/* Morning */}
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('morning');
+                                    } else {
+                                        isUnavailable = !!dateSlots['morning'];
+                                        isJob = dateSlots['morning']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'morning')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Morning</div>
+                                            <div className="text-xs opacity-75">
+                                                8:00 AM - 12:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
+
+                            {/* Afternoon */}
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('afternoon');
+                                    } else {
+                                        isUnavailable = !!dateSlots['afternoon'];
+                                        isJob = dateSlots['afternoon']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'afternoon')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Afternoon</div>
+                                            <div className="text-xs opacity-75">
+                                                12:00 PM - 8:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
+
+                            {/* Evening */}
+                            {(() => {
+                                const dateSlots = unavailability[selectedDate];
+                                let isUnavailable = false;
+                                let isJob = false;
+                                
+                                if (dateSlots) {
+                                    if (Array.isArray(dateSlots)) {
+                                        isUnavailable = dateSlots.includes('evening');
+                                    } else {
+                                        isUnavailable = !!dateSlots['evening'];
+                                        isJob = dateSlots['evening']?.reason === 'job';
+                                    }
+                                }
+                                
+                                return (
+                                    <button
+                                        onClick={() => toggleTimeSlot(selectedDate, 'evening')}
+                                        className={`w-full p-4 rounded-lg border-2 transition-all flex items-center justify-between ${
+                                            isUnavailable
+                                                ? isJob
+                                                    ? 'bg-blue-50 border-blue-500 text-blue-900'
+                                                    : 'bg-red-50 border-red-500 text-red-900'
+                                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-orange-500'
+                                        }`}
+                                    >
+                                        <div className="text-left">
+                                            <div className="font-bold text-sm">Evening</div>
+                                            <div className="text-xs opacity-75">
+                                                8:00 PM - 11:00 PM
+                                                {isJob && <span className="ml-2 font-bold">(Job Booked)</span>}
+                                            </div>
+                                        </div>
+                                        {isUnavailable && (
+                                            <Ban size={20} className={isJob ? 'text-blue-600' : 'text-red-600'} />
+                                        )}
+                                    </button>
+                                );
+                            })()}
+                        </div>
+                    </div>
+                    );
+                })()}
+            </div>
         </div>
     );
 };
