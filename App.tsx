@@ -4436,7 +4436,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                     />
                     <ToggleSwitch
                         label="Photo Blur"
-                        description="Blur your photos unless you've matched"
+                        description="Blurs your profile picture and in Social"
                         value={settings.blurPhotos}
                         onChange={(val) => setSettings({ ...settings, blurPhotos: val })}
                         icon={Eye}
