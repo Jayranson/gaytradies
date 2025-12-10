@@ -4448,6 +4448,13 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         onChange={(val) => setSettings({ ...settings, hideOnlineStatus: val })}
                         icon={Clock}
                     />
+                    <ToggleSwitch
+                        label="Job-Only Visibility"
+                        description="Appear in Hire tab only, not Social feed"
+                        value={settings.jobOnlyVisibility}
+                        onChange={(val) => setSettings({ ...settings, jobOnlyVisibility: val })}
+                        icon={Briefcase}
+                    />
                     
                     {/* Login History */}
                     <div className="pt-3 mt-3 border-t border-slate-100">
@@ -4534,13 +4541,6 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         icon={UserCheck}
                         disabled={true}
                         badge="Soon"
-                    />
-                    <ToggleSwitch
-                        label="Job-Only Visibility"
-                        description="Appear in Hire tab only, not Social feed"
-                        value={settings.jobOnlyVisibility}
-                        onChange={(val) => setSettings({ ...settings, jobOnlyVisibility: val })}
-                        icon={Briefcase}
                     />
                 </div>
 
