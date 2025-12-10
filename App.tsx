@@ -42,7 +42,8 @@ import {
   limit,
   where,
   increment,
-  arrayUnion
+  arrayUnion,
+  writeBatch
 } from 'firebase/firestore';
 
 // --- CONFIG & INIT ---
@@ -1576,6 +1577,12 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
         .filter(p => !socialFilter.trade || p.trade === socialFilter.trade)
         .filter(p => p.age >= socialFilter.minAge && p.age <= socialFilter.maxAge)
         .filter(p => !p.distanceKm || p.distanceKm <= socialFilter.distance)
+        // Apply user's "Verified Only" privacy setting
+        .filter(p => {
+            if (p.uid === user?.uid) return true; // Always show current user
+            if (!userProfile?.verifiedOnly) return true; // Setting not enabled
+            return p.verified === true; // Only show verified profiles
+        })
         .sort((a, b) => {
             // Current user's profile always appears first
             if (a.uid === user?.uid) return -1;
@@ -1585,7 +1592,7 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
             const bDist = b.distanceKm || 99999;
             return aDist - bDist; // Smaller distances first (top), larger distances last (bottom)
         });
-  }, [profiles, socialFilter, user]);
+  }, [profiles, socialFilter, user, userProfile]);
 
   // Hiring Filter Logic (GT1)
   const filteredHiringProfiles = useMemo(() => {
@@ -4295,19 +4302,27 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
         setActiveSessions(prev => prev.filter(s => s.id !== sessionId));
     };
 
-    const ToggleSwitch = ({ label, description, value, onChange, icon: Icon }) => (
-        <div className="flex items-start justify-between py-3 border-b border-slate-100 last:border-0">
+    const ToggleSwitch = ({ label, description, value, onChange, icon: Icon, disabled = false, badge = null }) => (
+        <div className={`flex items-start justify-between py-3 border-b border-slate-100 last:border-0 ${disabled ? 'opacity-50' : ''}`}>
             <div className="flex-1 pr-4">
                 <div className="flex items-center gap-2 mb-1">
                     {Icon && <Icon size={16} className="text-slate-500" />}
                     <h4 className="font-bold text-sm text-slate-800">{label}</h4>
+                    {badge && (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                            badge === 'Android' ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700'
+                        }`}>
+                            {badge === 'Android' ? 'Only on Android App' : 'Coming Soon'}
+                        </span>
+                    )}
                 </div>
                 {description && <p className="text-xs text-slate-500 leading-relaxed">{description}</p>}
             </div>
             <button
-                onClick={() => onChange(!value)}
+                onClick={() => !disabled && onChange(!value)}
+                disabled={disabled}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    value ? 'bg-orange-500' : 'bg-slate-300'
+                    disabled ? 'bg-slate-200 cursor-not-allowed' : value ? 'bg-orange-500' : 'bg-slate-300'
                 }`}
             >
                 <span
@@ -4341,6 +4356,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.useManualLocation}
                         onChange={(val) => setSettings({ ...settings, useManualLocation: val })}
                         icon={Navigation}
+                        disabled={true}
+                        badge="Soon"
                     />
                     {settings.useManualLocation && (
                         <div className="mt-3">
@@ -4349,6 +4366,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                                 placeholder="e.g., Central London"
                                 value={settings.manualLocation}
                                 onChange={(e) => setSettings({ ...settings, manualLocation: e.target.value })}
+                                disabled={true}
                             />
                         </div>
                     )}
@@ -4365,6 +4383,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyMessages}
                         onChange={(val) => setSettings({ ...settings, notifyMessages: val })}
                         icon={MessageCircle}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Job Offer Notifications"
@@ -4372,6 +4392,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyJobOffers}
                         onChange={(val) => setSettings({ ...settings, notifyJobOffers: val })}
                         icon={Briefcase}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Match Notifications"
@@ -4379,6 +4401,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.notifyMatches}
                         onChange={(val) => setSettings({ ...settings, notifyMatches: val })}
                         icon={Heart}
+                        disabled={true}
+                        badge="Android"
                     />
                 </div>
 
@@ -4467,11 +4491,14 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                     </h3>
                     
                     {/* Auto-delete chats */}
-                    <div className="py-3 border-b border-slate-100">
+                    <div className="py-3 border-b border-slate-100 opacity-50">
                         <label className="block mb-2">
                             <div className="flex items-center gap-2 mb-1">
                                 <Trash2 size={16} className="text-slate-500" />
                                 <span className="font-bold text-sm text-slate-800">Auto-delete Chats</span>
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">
+                                    Only on Android App
+                                </span>
                             </div>
                             <p className="text-xs text-slate-500 mb-2">Automatically delete messages after</p>
                         </label>
@@ -4479,6 +4506,7 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                             value={settings.autoDeleteChats}
                             onChange={(e) => setSettings({ ...settings, autoDeleteChats: e.target.value })}
                             className="w-full p-2 border border-slate-200 rounded-lg text-sm"
+                            disabled={true}
                         >
                             <option value="never">Never</option>
                             <option value="24h">24 hours</option>
@@ -4493,6 +4521,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.screenshotDetection}
                         onChange={(val) => setSettings({ ...settings, screenshotDetection: val })}
                         icon={Camera}
+                        disabled={true}
+                        badge="Android"
                     />
                     <ToggleSwitch
                         label="Verified-Only Chats"
@@ -4500,6 +4530,8 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                         value={settings.verifiedOnlyChats}
                         onChange={(val) => setSettings({ ...settings, verifiedOnlyChats: val })}
                         icon={UserCheck}
+                        disabled={true}
+                        badge="Soon"
                     />
                     <ToggleSwitch
                         label="Job-Only Visibility"
@@ -4537,19 +4569,109 @@ const SettingsScreen = ({ user, profile, onBack, showToast }) => {
                             }
                             
                             try {
-                                // Soft-delete: anonymize profile data
-                                // NOTE: This anonymizes the main profile. Additional cleanup for messages,
-                                // jobs, and reviews can be added here or handled by backend cleanup jobs.
-                                // Current approach preserves data integrity for historical job references.
-                                await updateDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid), {
-                                    name: '[Deleted User]',
-                                    bio: '[Account Deleted]',
-                                    email: '[Deleted]',
-                                    primaryPhoto: null,
-                                    coverPhoto: null,
-                                    deleted: true,
-                                    deletedAt: serverTimestamp()
-                                });
+                                showToast('Deleting account...', 'info');
+                                
+                                // Helper function to delete documents in batches (Firestore limit is 500 per batch)
+                                const deleteInBatches = async (docsToDelete) => {
+                                    const batchSize = 500;
+                                    for (let i = 0; i < docsToDelete.length; i += batchSize) {
+                                        const batch = writeBatch(db);
+                                        const batchDocs = docsToDelete.slice(i, i + batchSize);
+                                        batchDocs.forEach(docRef => batch.delete(docRef));
+                                        await batch.commit();
+                                    }
+                                };
+                                
+                                try {
+                                    // Delete all chats where user is a participant
+                                    const chatsQuery = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'chats'),
+                                        where('participants', 'array-contains', user.uid)
+                                    );
+                                    const chatsSnapshot = await getDocs(chatsQuery);
+                                    const docsToDelete = [];
+                                    
+                                    for (const chatDoc of chatsSnapshot.docs) {
+                                        // Collect all messages in the chat
+                                        const messagesQuery = collection(db, 'artifacts', getAppId(), 'public', 'data', 'chats', chatDoc.id, 'messages');
+                                        const messagesSnapshot = await getDocs(messagesQuery);
+                                        messagesSnapshot.docs.forEach(msgDoc => docsToDelete.push(msgDoc.ref));
+                                        // Add chat document itself
+                                        docsToDelete.push(chatDoc.ref);
+                                    }
+                                    
+                                    if (docsToDelete.length > 0) {
+                                        await deleteInBatches(docsToDelete);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting chats:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete all jobs associated with user (as client or tradie)
+                                    const jobsQuery1 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'jobs'),
+                                        where('clientId', '==', user.uid)
+                                    );
+                                    const jobsSnapshot1 = await getDocs(jobsQuery1);
+                                    
+                                    const jobsQuery2 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'jobs'),
+                                        where('tradieId', '==', user.uid)
+                                    );
+                                    const jobsSnapshot2 = await getDocs(jobsQuery2);
+                                    
+                                    const jobDocs = [...jobsSnapshot1.docs, ...jobsSnapshot2.docs].map(doc => doc.ref);
+                                    if (jobDocs.length > 0) {
+                                        await deleteInBatches(jobDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting jobs:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete all transactions
+                                    const transactionsQuery = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'transactions'),
+                                        where('userId', '==', user.uid)
+                                    );
+                                    const transactionsSnapshot = await getDocs(transactionsQuery);
+                                    const txDocs = transactionsSnapshot.docs.map(doc => doc.ref);
+                                    if (txDocs.length > 0) {
+                                        await deleteInBatches(txDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting transactions:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                try {
+                                    // Delete blocked users records
+                                    const blockedQuery1 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'blocked_users'),
+                                        where('blockedBy', '==', user.uid)
+                                    );
+                                    const blockedSnapshot1 = await getDocs(blockedQuery1);
+                                    
+                                    const blockedQuery2 = query(
+                                        collection(db, 'artifacts', getAppId(), 'public', 'data', 'blocked_users'),
+                                        where('blockedUser', '==', user.uid)
+                                    );
+                                    const blockedSnapshot2 = await getDocs(blockedQuery2);
+                                    
+                                    const blockedDocs = [...blockedSnapshot1.docs, ...blockedSnapshot2.docs].map(doc => doc.ref);
+                                    if (blockedDocs.length > 0) {
+                                        await deleteInBatches(blockedDocs);
+                                    }
+                                } catch (error) {
+                                    console.error('Error deleting blocked users:', error);
+                                    // Continue with other deletions
+                                }
+                                
+                                // Delete profile document
+                                await deleteDoc(doc(db, 'artifacts', getAppId(), 'public', 'data', 'profiles', user.uid));
                                 
                                 // Delete Firebase Auth account
                                 await deleteUser(user);
