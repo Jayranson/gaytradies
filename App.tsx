@@ -1544,12 +1544,14 @@ const Feed = ({ user, userProfile, activeTab, setActiveTab, onMessage, onRequest
       // Filter out blocked users
       allProfiles = allProfiles.filter(p => !blockedUserIds.has(p.uid));
       
-      // Apply incognito mode - hide profiles with incognito enabled (except current user)
-      allProfiles = allProfiles.filter(p => p.uid === user?.uid || !p.incognitoMode);
+      // Apply incognito mode - hide profiles with incognito enabled
+      // This hides the profile from all feeds including user's own feed
+      allProfiles = allProfiles.filter(p => !p.incognitoMode);
       
       // Apply job-only visibility filter for social tab
+      // Users with jobOnlyVisibility should only appear in hiring tab, not social
       if (activeTab === 'dating') {
-        allProfiles = allProfiles.filter(p => p.uid === user?.uid || !p.jobOnlyVisibility);
+        allProfiles = allProfiles.filter(p => !p.jobOnlyVisibility);
       }
       
       // Calculate distances for all profiles first
